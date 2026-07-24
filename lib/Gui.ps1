@@ -1,7 +1,14 @@
 $Script:GuiControls = $null
 
+function Get-GuiControl([string]$Name) {
+    if (-not $Script:GuiControls) { return $null }
+    return $Script:GuiControls.$Name
+}
+
 function Get-GuiSelectedMode {
-    foreach ($c in $Script:GuiControls.ModeBox.Controls) {
+    $modeBox = Get-GuiControl ModeBox
+    if (-not $modeBox) { return "Full" }
+    foreach ($c in $modeBox.Controls) {
         if ($c -is [System.Windows.Forms.RadioButton] -and $c.Checked) {
             return [string]$c.Tag
         }
@@ -11,17 +18,23 @@ function Get-GuiSelectedMode {
 
 function Set-GuiRunningState([bool]$running) {
     $enabled = -not $running
-    $Script:GuiControls.BtnRun.Enabled = $enabled
-    $Script:GuiControls.BtnCli.Enabled = $enabled
-    $Script:GuiControls.ModeBox.Enabled = $enabled
-    $Script:GuiControls.OptBox.Enabled = $enabled
+    $btnRun = Get-GuiControl BtnRun
+    $btnCli = Get-GuiControl BtnCli
+    $modeBox = Get-GuiControl ModeBox
+    $optBox = Get-GuiControl OptBox
+    if ($btnRun) { $btnRun.Enabled = $enabled }
+    if ($btnCli) { $btnCli.Enabled = $enabled }
+    if ($modeBox) { $modeBox.Enabled = $enabled }
+    if ($optBox) { $optBox.Enabled = $enabled }
 }
 
 function Update-GuiFreeSpace {
+    $free = Get-GuiControl Free
+    if (-not $free) { return }
     try {
-        $Script:GuiControls.Free.Text = ("C: free {0} GB" -f (Get-CFreeGB))
+        $free.Text = ("C: free {0} GB" -f (Get-CFreeGB))
     } catch {
-        $Script:GuiControls.Free.Text = "C: free -"
+        $free.Text = "C: free -"
     }
 }
 
@@ -216,7 +229,7 @@ function Show-MaintenanceGui {
     $btnQuit.Anchor = "Bottom,Right"
     $form.Controls.Add($btnQuit)
 
-    $Script:GuiControls = @{
+    $Script:GuiControls = [pscustomobject]@{
         Form       = $form
         ModeBox    = $modeBox
         OptBox     = $optBox
@@ -228,7 +241,7 @@ function Show-MaintenanceGui {
         Free       = $freeLbl
     }
 
-    $Script:Ui = @{
+    $Script:Ui = [pscustomobject]@{
         Form     = $form
         Progress = $progress
         Status   = $status
@@ -240,28 +253,33 @@ function Show-MaintenanceGui {
 
     $btnRun.Add_Click({
         Set-GuiRunningState $true
-        $Script:Ui.Progress.Value = 0
-        $Script:Ui.Log.Clear()
-        $Script:Ui.Status.Text = "Starting..."
+        Set-UiProgressValue 0
+        $logBox = Get-UiControl Log
+        if ($logBox) { $logBox.Clear() }
+        Set-UiStatusText "Starting..."
         Append-UiLog "Starting PC Maintenance..." "Cyan"
 
         $mode = Get-GuiSelectedMode
         Apply-ModeFlags -ModeName $mode
 
+        $chkRestore = Get-GuiControl ChkRestore
+        $chkAmd = Get-GuiControl ChkAmd
+        $daysNum = Get-GuiControl DaysNum
+
         if ($mode -eq "CleanupOnly" -or $mode -eq "Repair") {
-            $Script:DoRestorePoint = $Script:GuiControls.ChkRestore.Checked
+            $Script:DoRestorePoint = [bool]$chkRestore.Checked
             $Script:DoAmd = $false
         } else {
-            $Script:DoRestorePoint = $Script:GuiControls.ChkRestore.Checked
-            $Script:DoAmd = $Script:GuiControls.ChkAmd.Checked
+            $Script:DoRestorePoint = [bool]$chkRestore.Checked
+            $Script:DoAmd = [bool]$chkAmd.Checked
         }
 
-        $Script:TempOlderThanDays = [int]$Script:GuiControls.DaysNum.Value
+        $Script:TempOlderThanDays = [int]$daysNum.Value
 
         try {
             [void](Invoke-MaintenanceRun)
             Update-GuiFreeSpace
-            $Script:Ui.Status.Text = ("Finished - {0}" -f (Get-Elapsed))
+            Set-UiStatusText ("Finished - {0}" -f (Get-Elapsed))
             [System.Windows.Forms.MessageBox]::Show(
                 "Maintenance finished.`nLogs: Desktop\PC-Maintenance-Logs",
                 "PC Maintenance",
@@ -270,7 +288,7 @@ function Show-MaintenanceGui {
             ) | Out-Null
         } catch {
             Write-Fail $_.Exception.Message
-            $Script:Ui.Status.Text = "Failed"
+            Set-UiStatusText "Failed"
             [System.Windows.Forms.MessageBox]::Show(
                 $_.Exception.Message,
                 "PC Maintenance",
@@ -280,22 +298,23 @@ function Show-MaintenanceGui {
         } finally {
             Set-GuiRunningState $false
         }
-    }.GetNewClosure())
+    })
 
     $btnLogs.Add_Click({
         $dir = Join-Path $env:USERPROFILE "Desktop\PC-Maintenance-Logs"
         if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
         Start-Process explorer.exe $dir
-    }.GetNewClosure())
+    })
 
     $btnCli.Add_Click({
         $scriptPath = Join-Path $Script:AppRoot "PC-Maintenance.ps1"
         Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Mode Cli"
-    }.GetNewClosure())
+    })
 
     $btnQuit.Add_Click({
-        $Script:GuiControls.Form.Close()
-    }.GetNewClosure())
+        $mainForm = Get-GuiControl Form
+        if ($mainForm) { $mainForm.Close() }
+    })
 
     [void]$form.ShowDialog()
 }

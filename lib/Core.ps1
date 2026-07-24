@@ -16,9 +16,26 @@ $Script:Ui = $null
 $Script:CancelRequested = $false
 
 function Pump-Ui {
-    if ($Script:Ui -and $Script:Ui.Form -and -not $Script:Ui.Form.IsDisposed) {
+    $form = Get-UiControl Form
+    if ($form -and -not $form.IsDisposed) {
         [System.Windows.Forms.Application]::DoEvents()
     }
+}
+
+function Get-UiControl([string]$Name) {
+    if (-not $Script:Ui) { return $null }
+    return $Script:Ui.$Name
+}
+
+function Set-UiProgressValue([int]$Value) {
+    $bar = Get-UiControl Progress
+    if (-not $bar) { return }
+    $bar.Value = [math]::Max(0, [math]::Min(100, $Value))
+}
+
+function Set-UiStatusText([string]$Text) {
+    $lbl = Get-UiControl Status
+    if ($lbl) { $lbl.Text = $Text }
 }
 
 function Ensure-Admin {
@@ -77,12 +94,8 @@ function Update-UiProgress {
     param([string]$Label = "")
     if ($Script:TotalSteps -le 0) { return }
     $pct = [math]::Min(100, [math]::Round(($Script:CurrentStep / $Script:TotalSteps) * 100))
-    if ($Script:Ui -and $Script:Ui.Progress) {
-        $Script:Ui.Progress.Value = [math]::Min(100, [int]$pct)
-        if ($Script:Ui.Status) {
-            $Script:Ui.Status.Text = "Step $($Script:CurrentStep)/$($Script:TotalSteps)  $(Get-Elapsed)  $Label"
-        }
-    }
+    Set-UiProgressValue -Value ([int]$pct)
+    Set-UiStatusText -Text ("Step {0}/{1}  {2}  {3}" -f $Script:CurrentStep, $Script:TotalSteps, (Get-Elapsed), $Label)
     $width = 30
     $filled = [math]::Round(($pct / 100) * $width)
     $bar = ("#" * $filled) + ("-" * ($width - $filled))
@@ -94,8 +107,8 @@ function Update-UiProgress {
 
 function Append-UiLog {
     param([string]$msg, [string]$ColorName = "White")
-    if (-not ($Script:Ui -and $Script:Ui.Log)) { return }
-    $box = $Script:Ui.Log
+    $box = Get-UiControl Log
+    if (-not $box) { return }
     $color = switch ($ColorName) {
         'Green'  { [System.Drawing.Color]::FromArgb(80, 200, 120) }
         'Yellow' { [System.Drawing.Color]::FromArgb(230, 180, 60) }
@@ -173,8 +186,8 @@ function Wait-WithSpinner {
         $ch = $spin[$i % 4]
         $sec = [int]$sw.Elapsed.TotalSeconds
         Write-Host -NoNewline ("`r  [{0}] {1}... {2}s / {3}s max   " -f $ch, $Activity, $sec, $TimeoutSec) -ForegroundColor DarkYellow
-        if ($Script:Ui -and $Script:Ui.Status) {
-            $Script:Ui.Status.Text = "[$ch] $Activity... ${sec}s / ${TimeoutSec}s"
+        if ($Script:Ui) {
+            Set-UiStatusText -Text ("[{0}] {1}... {2}s / {3}s" -f $ch, $Activity, $sec, $TimeoutSec)
         }
         Pump-Ui
         Start-Sleep -Milliseconds 250
@@ -529,9 +542,7 @@ function Invoke-Repair {
         while (-not $p.HasExited) {
             $sec = [int]((Get-Date) - $p.StartTime).TotalSeconds
             Write-Host -NoNewline ("`r  [{0}] DISM running... {1}s   " -f $spin[$i % 4], $sec) -ForegroundColor DarkYellow
-            if ($Script:Ui -and $Script:Ui.Status) {
-                $Script:Ui.Status.Text = "[$($spin[$i % 4])] DISM running... ${sec}s"
-            }
+            Set-UiStatusText -Text ("[{0}] DISM running... {1}s" -f $spin[$i % 4], $sec)
             Pump-Ui
             Start-Sleep -Milliseconds 400
             $i++
@@ -558,9 +569,7 @@ function Invoke-Repair {
         while (-not $p.HasExited) {
             $sec = [int]((Get-Date) - $p.StartTime).TotalSeconds
             Write-Host -NoNewline ("`r  [{0}] SFC running... {1}s   " -f $spin[$i % 4], $sec) -ForegroundColor DarkYellow
-            if ($Script:Ui -and $Script:Ui.Status) {
-                $Script:Ui.Status.Text = "[$($spin[$i % 4])] SFC running... ${sec}s"
-            }
+            Set-UiStatusText -Text ("[{0}] SFC running... {1}s" -f $spin[$i % 4], $sec)
             Pump-Ui
             Start-Sleep -Milliseconds 400
             $i++
