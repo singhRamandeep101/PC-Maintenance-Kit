@@ -20,6 +20,8 @@ if (-not $Script:AppRoot -or -not (Test-Path -LiteralPath (Join-Path $Script:App
 
 try {
     . (Join-Path $Script:AppRoot "lib\Core.ps1")
+    . (Join-Path $Script:AppRoot "lib\Gaming.ps1")
+    . (Join-Path $Script:AppRoot "lib\Device.ps1")
     . (Join-Path $Script:AppRoot "lib\Gui.ps1")
 
     $relaunch = "-Mode $Mode"
@@ -27,7 +29,7 @@ try {
     Ensure-Admin -ScriptPath $PSCommandPath -RelaunchArgs $relaunch
 
     $ErrorActionPreference = 'Continue'
-    try { $host.UI.RawUI.WindowTitle = "PC Maintenance v4" } catch { }
+    try { $host.UI.RawUI.WindowTitle = "PC Maintenance Kit v5" } catch { }
     $Script:TempOlderThanDays = $TempOlderThanDays
 
     switch ($Mode) {

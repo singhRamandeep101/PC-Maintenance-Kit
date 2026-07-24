@@ -9,6 +9,8 @@ $Script:DoWinget = $true
 $Script:DoRepair = $false
 $Script:DoRestorePoint = $true
 $Script:DoAmd = $true
+$Script:DoShaderCleanup = $false
+$Script:DoGamingOptimize = $true
 $Script:TotalSteps = 0
 $Script:CurrentStep = 0
 $Script:RunStart = Get-Date
@@ -234,6 +236,16 @@ function Get-CFreeGB {
     return [math]::Round($d.FreeSpace / 1GB, 1)
 }
 
+function Test-RebootPending {
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") { return $true }
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") { return $true }
+    try {
+        $pfr = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name PendingFileRenameOperations -EA SilentlyContinue
+        if ($pfr -and $pfr.PendingFileRenameOperations) { return $true }
+    } catch { }
+    return $false
+}
+
 function Wait-WithSpinner {
     param(
         [System.Diagnostics.Process]$Process,
@@ -272,24 +284,29 @@ function Apply-ModeFlags {
     )
     switch ($ModeName) {
         'Full' {
-            $Script:DoCleanup=$true; $Script:DoUpdates=$true; $Script:DoWinUpdate=$true; $Script:DoWinget=$true
-            $Script:DoRepair=$false; $Script:DoRestorePoint=$true; $Script:DoAmd=$true
+            $Script:DoCleanup=$true; $Script:DoUpdates=$true; $Script:DoWinUpdate=$false; $Script:DoWinget=$false
+            $Script:DoRepair=$false; $Script:DoRestorePoint=$true; $Script:DoAmd=$false
+            $Script:DoShaderCleanup=$true; $Script:DoGamingOptimize=$true
         }
         'CleanupOnly' {
             $Script:DoCleanup=$true; $Script:DoUpdates=$false; $Script:DoWinUpdate=$false; $Script:DoWinget=$false
             $Script:DoRepair=$false; $Script:DoRestorePoint=$false; $Script:DoAmd=$false
+            $Script:DoShaderCleanup=$true; $Script:DoGamingOptimize=$false
         }
         'UpdatesOnly' {
             $Script:DoCleanup=$false; $Script:DoUpdates=$true; $Script:DoWinUpdate=$true; $Script:DoWinget=$true
             $Script:DoRepair=$false; $Script:DoRestorePoint=$true; $Script:DoAmd=$true
+            $Script:DoShaderCleanup=$false; $Script:DoGamingOptimize=$false
         }
         'Repair' {
             $Script:DoCleanup=$false; $Script:DoUpdates=$false; $Script:DoWinUpdate=$false; $Script:DoWinget=$false
             $Script:DoRepair=$true; $Script:DoRestorePoint=$true; $Script:DoAmd=$false
+            $Script:DoShaderCleanup=$false; $Script:DoGamingOptimize=$false
         }
         'FullRepair' {
             $Script:DoCleanup=$true; $Script:DoUpdates=$true; $Script:DoWinUpdate=$true; $Script:DoWinget=$true
             $Script:DoRepair=$true; $Script:DoRestorePoint=$true; $Script:DoAmd=$true
+            $Script:DoShaderCleanup=$true; $Script:DoGamingOptimize=$true
         }
     }
 }
@@ -302,10 +319,12 @@ function Build-StepPlan {
         [void]$Script:StepNames.Add("Browser caches")
         [void]$Script:StepNames.Add("Recycle Bin")
     }
+    if ($Script:DoShaderCleanup) { [void]$Script:StepNames.Add("GPU shader caches") }
     if ($Script:DoWinUpdate) { [void]$Script:StepNames.Add("Windows Update") }
     if ($Script:DoWinget) { [void]$Script:StepNames.Add("winget upgrades") }
     if ($Script:DoAmd) { [void]$Script:StepNames.Add("AMD Adrenalin") }
     if ($Script:DoRepair) { [void]$Script:StepNames.Add("DISM + SFC repair") }
+    if ($Script:DoGamingOptimize) { [void]$Script:StepNames.Add("Gaming optimize") }
     [void]$Script:StepNames.Add("Health checks")
     $Script:TotalSteps = $Script:StepNames.Count
     $Script:CurrentStep = 0
@@ -606,6 +625,114 @@ function Invoke-AmdOpen {
     }
 }
 
+function Invoke-ShaderCacheCleanup {
+    Write-Step "Cleaning GPU shader caches"
+    Write-Info "Games may rebuild shaders on next launch (one-time stutter)"
+    $total = 0L
+    $paths = @(
+        "$env:LOCALAPPDATA\D3DSCache",
+        "$env:LOCALAPPDATA\AMD\DxCache",
+        "$env:LOCALAPPDATA\AMD\Dx9Cache",
+        "$env:LOCALAPPDATA\AMD\DxcCache",
+        "$env:LOCALAPPDATA\NVIDIA\DXCache",
+        "$env:LOCALAPPDATA\NVIDIA\GLCache",
+        "$env:LOCALAPPDATA\NVIDIA Corporation\NV_Cache"
+    )
+    foreach ($p in $paths) {
+        if (-not (Test-Path $p)) { continue }
+        $freed = Remove-OldFilesInPath -Path $p -OlderThanDays 0 -DeleteFoldersToo
+        $total += $freed
+        if ($freed -gt 1MB) {
+            Write-Ok ("{0}: freed {1:N0} MB" -f (Split-Path $p -Leaf), ($freed / 1MB))
+        }
+    }
+    if ($total -gt 1MB) {
+        Write-Ok ("Shader caches total: {0:N0} MB" -f ($total / 1MB))
+    } else {
+        Write-Ok "Shader caches already light"
+    }
+}
+
+function Invoke-LauncherCacheCleanup {
+    param(
+        [switch]$Steam,
+        [switch]$Epic,
+        [switch]$Riot
+    )
+    Write-Step "Launcher download caches"
+    $total = 0L
+    if ($Steam) {
+        $steamRoots = @(
+            "C:\Program Files (x86)\Steam\steamapps\downloading",
+            "D:\Steam\steamapps\downloading",
+            "E:\Steam\steamapps\downloading"
+        )
+        foreach ($p in $steamRoots) {
+            if (-not (Test-Path $p)) { continue }
+            Write-Info "Steam downloading: $p"
+            $freed = Remove-OldFilesInPath -Path $p -OlderThanDays 0 -DeleteFoldersToo
+            $total += $freed
+        }
+    }
+    if ($Epic) {
+        $epic = @(
+            "$env:LOCALAPPDATA\EpicGamesLauncher\Saved\webcache",
+            "$env:LOCALAPPDATA\EpicGamesLauncher\Saved\webcache_4430",
+            "$env:LOCALAPPDATA\EpicGamesLauncher\Saved\Logs"
+        )
+        foreach ($p in $epic) {
+            if (-not (Test-Path $p)) { continue }
+            $freed = Remove-OldFilesInPath -Path $p -OlderThanDays 0 -DeleteFoldersToo
+            $total += $freed
+        }
+    }
+    if ($Riot) {
+        $riot = @(
+            "$env:LOCALAPPDATA\Riot Games\Riot Client\CefCache",
+            "$env:LOCALAPPDATA\Riot Games\Riot Client\Logs"
+        )
+        foreach ($p in $riot) {
+            if (-not (Test-Path $p)) { continue }
+            $freed = Remove-OldFilesInPath -Path $p -OlderThanDays 0 -DeleteFoldersToo
+            $total += $freed
+        }
+    }
+    if ($total -gt 1MB) {
+        Write-Ok ("Launcher caches total: {0:N0} MB" -f ($total / 1MB))
+    } else {
+        Write-Ok "Launcher caches already clean (or paths not found)"
+    }
+}
+
+function Invoke-NvidiaAppOpen {
+    $paths = @(
+        "$env:ProgramFiles\NVIDIA Corporation\NVIDIA App\CEF\NVIDIA App.exe",
+        "$env:ProgramFiles\NVIDIA Corporation\NVIDIA GeForce Experience\NVIDIA GeForce Experience.exe",
+        "${env:ProgramFiles(x86)}\NVIDIA Corporation\NVIDIA GeForce Experience\NVIDIA GeForce Experience.exe"
+    )
+    $exe = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($exe) {
+        Start-Process $exe
+        Write-Ok "Opened NVIDIA app"
+        return $true
+    }
+    Write-Warn "NVIDIA app not found"
+    return $false
+}
+
+function Show-RebootRecommendedDialog {
+    if (-not (Test-RebootPending)) { return }
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -EA SilentlyContinue
+        [System.Windows.Forms.MessageBox]::Show(
+            "Windows has a pending restart (often after updates).`n`nRestart when you finish gaming for best stability.",
+            "PC Maintenance - Restart recommended",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
+    } catch { }
+}
+
 function Invoke-GamingChecks {
     Write-Step "Quick health / gaming checks"
     try {
@@ -654,10 +781,7 @@ function Invoke-GamingChecks {
         }
     } catch { }
 
-    $reboot = $false
-    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") { $reboot = $true }
-    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") { $reboot = $true }
-    if ($reboot) {
+    if (Test-RebootPending) {
         Write-Warn "A RESTART is pending - reboot when convenient (this is normal after updates)"
     } else {
         Write-Ok "No pending restart detected"
@@ -754,10 +878,16 @@ function Invoke-MaintenanceRun {
         Invoke-BrowserCacheCleanup
         Invoke-RecycleAndCleanMgr
     }
+    if ($Script:DoShaderCleanup) { Invoke-ShaderCacheCleanup }
     if ($Script:DoWinUpdate) { Invoke-WindowsUpdate }
     if ($Script:DoWinget) { Invoke-WingetUpdates }
     if ($Script:DoAmd) { Invoke-AmdOpen }
     if ($Script:DoRepair) { Invoke-Repair }
+    if ($Script:DoGamingOptimize) {
+        if (Get-Command Invoke-GamingOptimize -EA SilentlyContinue) {
+            Invoke-GamingOptimize
+        }
+    }
 
     Invoke-GamingChecks
 
@@ -771,5 +901,6 @@ function Invoke-MaintenanceRun {
     Append-UiLog $summary "Cyan"
     Write-Log "DONE"
     Write-Log $summary
+    Show-RebootRecommendedDialog
     return $summary
 }

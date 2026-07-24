@@ -1,47 +1,40 @@
-# PC Maintenance Kit
+# PC Maintenance Kit v5
 
-Windows maintenance tool with a simple GUI. Cleans temp/browser caches, runs updates, checks gaming-related settings, and can repair Windows with DISM/SFC.
+Gamer-focused Windows maintenance toolkit with a tabbed dark GUI (WMT-inspired, not a full sysadmin suite).
 
-Requires Windows 10/11 and Administrator permission.
+Built for weekly cleanup, gaming optimizations, controlled updates, and optional repair on Windows 10/11 gaming PCs.
 
 ## Quick start
 
-1. Download or clone this repo
-2. Double-click **Start.bat**
-3. Allow the UAC prompt
-4. Pick a mode and click **Run**
+1. Download or clone this repo  
+2. Double-click **Start.bat**  
+3. Allow the UAC prompt  
+4. Use the tabs — start with **Home → Run Weekly Full**
 
-## Modes
+## Tabs
 
-| Mode | What it does |
-|------|----------------|
-| **Full run** | Restore point, cleanup, Windows Update, winget, AMD Adrenalin, health checks |
-| **Cleanup only** | Temp files, browser caches, Recycle Bin |
-| **Updates only** | Restore point, Windows Update, winget, AMD |
-| **Repair** | DISM + SFC (slow; use when Windows feels broken) |
-| **Full + Repair** | Everything including DISM/SFC |
+| Tab | What it does |
+|-----|----------------|
+| **Home** | Device snapshot + Weekly Full (cleanup + gaming opts; WU/winget off by default) |
+| **Cleanup** | Temp, browsers, Recycle Bin, GPU shader caches; optional Steam/Epic/Riot caches (confirm) |
+| **Updates** | Windows Update and/or winget; open AMD Adrenalin / NVIDIA App |
+| **Gaming** | Game Mode on, Game DVR/ReLive off, Ultimate Performance, Discord HW accel off |
+| **Repair** | Restore point + DISM/SFC (slow; confirm required) |
+| **Device** | CPU/GPU/RAM channels, SSD health, free space, reboot pending |
 
-## Options
+## Safety
 
-- **Create restore point** — recommended before updates/repair
-- **Open AMD Adrenalin** — opens the app so you can check GPU drivers (skipped if not installed)
-- **Temp age (days)** — only delete temp files older than this (default 2)
+- Weekly Full does **not** run Windows Update / winget unless you check those boxes  
+- Launcher cache cleanup asks for confirmation  
+- Repair asks for confirmation  
+- Pending restart is detected and shown after runs  
+- Windows Update download-cache wipe is skipped when updates run in the same session  
 
 ## Logs
 
-Every run writes a log to:
-
 `Desktop\PC-Maintenance-Logs\`
 
-Use **Open logs** in the GUI to jump there.
-
 ## CLI
-
-```bat
-Start.bat
-```
-
-Or:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\PC-Maintenance.ps1 -Mode Gui
@@ -53,12 +46,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\PC-Maintenance.ps1 -Mode R
 powershell -NoProfile -ExecutionPolicy Bypass -File .\PC-Maintenance.ps1 -Mode FullRepair
 ```
 
-## Notes
+**Full** mode = weekly gamer defaults (cleanup + shaders + gaming optimize; updates off).  
+**FullRepair** = everything including updates + DISM/SFC.
 
-- Close browsers before cleanup for best results
-- Repair can take 10–30+ minutes
-- Xbox Game DVR / AMD ReLive are turned off during health checks if found enabled
-- No third-party “optimizer” junk — only built-in Windows tools + winget
+## Requirements
+
+- Windows 10/11  
+- PowerShell 5.1+  
+- Administrator  
+
+## Not included (on purpose)
+
+Firewall editor, hosts adblock, mass debloat, registry cleaners, 100+ privacy toggles, full package-manager zoo. Keep the tool trustworthy for gamers.
 
 ## License
 
