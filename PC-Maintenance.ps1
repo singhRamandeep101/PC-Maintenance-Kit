@@ -7,9 +7,9 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-. (Join-Path $Root "lib\Core.ps1")
-. (Join-Path $Root "lib\Gui.ps1")
+$Script:AppRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $Script:AppRoot "lib\Core.ps1")
+. (Join-Path $Script:AppRoot "lib\Gui.ps1")
 
 $relaunch = ""
 if ($Mode -ne 'Gui') { $relaunch = "-Mode $Mode" }

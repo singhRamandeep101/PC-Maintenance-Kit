@@ -21,9 +21,9 @@ function Set-GuiRunningState([bool]$running) {
 
 function Update-GuiFreeSpace {
     try {
-        $Script:GuiControls.Free.Text = "C: free $(Get-CFreeGB) GB"
+        $Script:GuiControls.Free.Text = ("C: free {0} GB" -f (Get-CFreeGB))
     } catch {
-        $Script:GuiControls.Free.Text = "C: free —"
+        $Script:GuiControls.Free.Text = "C: free -"
     }
 }
 
@@ -58,14 +58,14 @@ function Show-MaintenanceGui {
     $form.Controls.Add($title)
 
     $sub = New-Object System.Windows.Forms.Label
-    $sub.Text = "Cleanup · Updates · Health checks · Optional repair"
+    $sub.Text = "Cleanup / Updates / Health checks / Optional repair"
     $sub.ForeColor = $muted
     $sub.AutoSize = $true
     $sub.Location = New-Object System.Drawing.Point(26, 52)
     $form.Controls.Add($sub)
 
     $freeLbl = New-Object System.Windows.Forms.Label
-    $freeLbl.Text = "C: free —"
+    $freeLbl.Text = "C: free -"
     $freeLbl.ForeColor = $accent
     $freeLbl.AutoSize = $true
     $freeLbl.Location = New-Object System.Drawing.Point(620, 28)
@@ -252,8 +252,7 @@ function Show-MaintenanceGui {
 
         if ($mode -eq "CleanupOnly" -or $mode -eq "Repair") {
             $Script:DoRestorePoint = $Script:GuiControls.ChkRestore.Checked
-            if ($mode -eq "CleanupOnly") { $Script:DoAmd = $false }
-            else { $Script:DoAmd = $false }
+            $Script:DoAmd = $false
         } else {
             $Script:DoRestorePoint = $Script:GuiControls.ChkRestore.Checked
             $Script:DoAmd = $Script:GuiControls.ChkAmd.Checked
@@ -264,7 +263,7 @@ function Show-MaintenanceGui {
         try {
             [void](Invoke-MaintenanceRun)
             Update-GuiFreeSpace
-            $Script:Ui.Status.Text = "Finished — $(Get-Elapsed)"
+            $Script:Ui.Status.Text = ("Finished - {0}" -f (Get-Elapsed))
             [System.Windows.Forms.MessageBox]::Show(
                 "Maintenance finished.`nLogs: Desktop\PC-Maintenance-Logs",
                 "PC Maintenance",
@@ -292,9 +291,8 @@ function Show-MaintenanceGui {
     }.GetNewClosure())
 
     $btnCli.Add_Click({
-        $root = Split-Path -Parent $PSCommandPath
-        if (-not $root) { $root = (Get-Location).Path }
-        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$root\PC-Maintenance.ps1`" -Mode Cli"
+        $scriptPath = Join-Path $Script:AppRoot "PC-Maintenance.ps1"
+        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Mode Cli"
     }.GetNewClosure())
 
     $btnQuit.Add_Click({
@@ -306,22 +304,20 @@ function Show-MaintenanceGui {
 
 function Show-CliMenu {
     Clear-Host
-    Write-Host @"
-
-  ========================================
-     PC MAINTENANCE v4
-  ========================================
-  Logs: Desktop\PC-Maintenance-Logs
-
-  [1] Full run (recommended weekly)
-  [2] Cleanup only
-  [3] Updates only
-  [4] Repair Windows (DISM + SFC)
-  [5] Full + Repair
-  [Q] Quit
-  ========================================
-
-"@ -ForegroundColor White
+    Write-Host ""
+    Write-Host "  ========================================"
+    Write-Host "     PC MAINTENANCE v4"
+    Write-Host "  ========================================"
+    Write-Host "  Logs: Desktop\PC-Maintenance-Logs"
+    Write-Host ""
+    Write-Host "  [1] Full run (recommended weekly)"
+    Write-Host "  [2] Cleanup only"
+    Write-Host "  [3] Updates only"
+    Write-Host "  [4] Repair Windows (DISM + SFC)"
+    Write-Host "  [5] Full + Repair"
+    Write-Host "  [Q] Quit"
+    Write-Host "  ========================================"
+    Write-Host ""
 
     $choice = Read-Host "  Choose option"
     switch ($choice.ToUpper()) {
