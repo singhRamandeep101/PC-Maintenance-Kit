@@ -1,5 +1,3 @@
-#Requires -Version 5.1
-
 $Script:Report = [System.Collections.Generic.List[string]]::new()
 $Script:LogFile = $null
 $Script:StartFree = 0
@@ -24,15 +22,36 @@ function Pump-Ui {
 }
 
 function Ensure-Admin {
-    param([string]$RelaunchArgs = "")
+    param(
+        [string]$ScriptPath = "",
+        [string]$RelaunchArgs = ""
+    )
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
     $p  = [Security.Principal.WindowsPrincipal]::new($id)
-    if (-not $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        $arg = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-        if ($RelaunchArgs) { $arg += " $RelaunchArgs" }
-        Start-Process powershell.exe -Verb RunAs -ArgumentList $arg
-        exit
+    if ($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { return }
+
+    if (-not $ScriptPath) { $ScriptPath = $PSCommandPath }
+    if (-not $ScriptPath -or -not (Test-Path -LiteralPath $ScriptPath)) {
+        throw "Cannot elevate: script path not found."
     }
+
+    $ps = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -STA -File `"$ScriptPath`""
+    if ($RelaunchArgs) { $arguments += " $RelaunchArgs" }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $ps
+    $psi.Arguments = $arguments
+    $psi.WorkingDirectory = (Split-Path -Parent $ScriptPath)
+    $psi.Verb = "runas"
+    $psi.UseShellExecute = $true
+
+    try {
+        [System.Diagnostics.Process]::Start($psi) | Out-Null
+    } catch {
+        throw "Elevation cancelled or failed: $($_.Exception.Message)"
+    }
+    exit 0
 }
 
 function Init-Log {

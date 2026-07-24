@@ -1,5 +1,3 @@
-#Requires -Version 5.1
-
 $Script:GuiControls = $null
 
 function Get-GuiSelectedMode {
