@@ -1,0 +1,6 @@
+*.log
+PC-Maintenance-Logs/
+.DS_Store
+Thumbs.db
+*.rar
+*.zip
