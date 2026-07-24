@@ -399,21 +399,31 @@ function Invoke-TempCleanup {
     }
 
     try {
-        Write-Info "Clearing Windows Update download cache..."
-        $do = "C:\Windows\SoftwareDistribution\Download"
-        if (Test-Path $do) {
-            Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
-            Stop-Service bits -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
-            $before = (Get-ChildItem $do -Recurse -Force -File -EA SilentlyContinue |
-                Measure-Object Length -Sum -EA SilentlyContinue).Sum
-            if (-not $before) { $before = 0 }
-            Get-ChildItem $do -Force -EA SilentlyContinue | Remove-Item -Recurse -Force -EA SilentlyContinue
-            $total += $before
-            $job = Start-Job { Start-Service bits -EA SilentlyContinue; Start-Service wuauserv -EA SilentlyContinue }
-            $null = Wait-Job $job -Timeout 15
-            Remove-Job $job -Force -EA SilentlyContinue
-            Write-Ok ("Update download cache: {0:N0} MB" -f ($before / 1MB))
+        if ($Script:DoWinUpdate) {
+            Write-Info "Skipped Windows Update download-cache wipe (updates will run next)"
+        } else {
+            Write-Info "Clearing Windows Update download cache..."
+            $do = "C:\Windows\SoftwareDistribution\Download"
+            if (Test-Path $do) {
+                $wuStopped = $false
+                $bitsStopped = $false
+                try {
+                    Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
+                    $wuStopped = $true
+                    Stop-Service bits -Force -ErrorAction SilentlyContinue
+                    $bitsStopped = $true
+                    Start-Sleep -Seconds 2
+                    $before = (Get-ChildItem $do -Recurse -Force -File -EA SilentlyContinue |
+                        Measure-Object Length -Sum -EA SilentlyContinue).Sum
+                    if (-not $before) { $before = 0 }
+                    Get-ChildItem $do -Force -EA SilentlyContinue | Remove-Item -Recurse -Force -EA SilentlyContinue
+                    $total += $before
+                    Write-Ok ("Update download cache: {0:N0} MB" -f ($before / 1MB))
+                } finally {
+                    if ($bitsStopped) { Start-Service bits -EA SilentlyContinue }
+                    if ($wuStopped) { Start-Service wuauserv -EA SilentlyContinue }
+                }
+            }
         }
     } catch {
         Write-Warn "Update download cache partially skipped"
@@ -629,10 +639,29 @@ function Invoke-GamingChecks {
         Write-Ok "AMD ReLive set to Off"
     }
 
+    try {
+        $wu = Get-Service wuauserv -EA SilentlyContinue
+        $bits = Get-Service bits -EA SilentlyContinue
+        if ($wu -and $wu.Status -ne 'Running') {
+            Write-Warn "Windows Update service was stopped - starting it"
+            Start-Service wuauserv -EA SilentlyContinue
+        } else {
+            Write-Ok "Windows Update service: Running"
+        }
+        if ($bits -and $bits.Status -ne 'Running') {
+            Write-Warn "BITS service was stopped - starting it"
+            Start-Service bits -EA SilentlyContinue
+        }
+    } catch { }
+
     $reboot = $false
     if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") { $reboot = $true }
     if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") { $reboot = $true }
-    if ($reboot) { Write-Warn "A RESTART is pending" } else { Write-Ok "No pending restart detected" }
+    if ($reboot) {
+        Write-Warn "A RESTART is pending - reboot when convenient (this is normal after updates)"
+    } else {
+        Write-Ok "No pending restart detected"
+    }
 }
 
 function Invoke-Repair {
