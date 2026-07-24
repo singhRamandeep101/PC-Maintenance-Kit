@@ -88,7 +88,7 @@ function Show-MaintenanceGui {
     $modeBox.ForeColor = $muted
     $modeBox.BackColor = $panel
     $modeBox.Location = New-Object System.Drawing.Point(24, 88)
-    $modeBox.Size = New-Object System.Drawing.Size(390, 210)
+    $modeBox.Size = New-Object System.Drawing.Size(390, 230)
     $form.Controls.Add($modeBox)
 
     $modeDefs = @(
@@ -116,7 +116,7 @@ function Show-MaintenanceGui {
     $optBox.ForeColor = $muted
     $optBox.BackColor = $panel
     $optBox.Location = New-Object System.Drawing.Point(430, 88)
-    $optBox.Size = New-Object System.Drawing.Size(390, 210)
+    $optBox.Size = New-Object System.Drawing.Size(390, 230)
     $optBox.Anchor = "Top,Right"
     $form.Controls.Add($optBox)
 
@@ -136,10 +136,26 @@ function Show-MaintenanceGui {
     $chkAmd.AutoSize = $true
     $optBox.Controls.Add($chkAmd)
 
+    $chkWU = New-Object System.Windows.Forms.CheckBox
+    $chkWU.Text = "Windows Update (can be slow)"
+    $chkWU.Checked = $true
+    $chkWU.ForeColor = $text
+    $chkWU.Location = New-Object System.Drawing.Point(18, 100)
+    $chkWU.AutoSize = $true
+    $optBox.Controls.Add($chkWU)
+
+    $chkWinget = New-Object System.Windows.Forms.CheckBox
+    $chkWinget.Text = "winget app upgrades (can be slow)"
+    $chkWinget.Checked = $true
+    $chkWinget.ForeColor = $text
+    $chkWinget.Location = New-Object System.Drawing.Point(18, 128)
+    $chkWinget.AutoSize = $true
+    $optBox.Controls.Add($chkWinget)
+
     $daysLbl = New-Object System.Windows.Forms.Label
     $daysLbl.Text = "Delete temp files older than (days)"
     $daysLbl.ForeColor = $text
-    $daysLbl.Location = New-Object System.Drawing.Point(18, 114)
+    $daysLbl.Location = New-Object System.Drawing.Point(18, 158)
     $daysLbl.AutoSize = $true
     $optBox.Controls.Add($daysLbl)
 
@@ -147,21 +163,14 @@ function Show-MaintenanceGui {
     $daysNum.Minimum = 0
     $daysNum.Maximum = 30
     $daysNum.Value = 2
-    $daysNum.Location = New-Object System.Drawing.Point(18, 142)
+    $daysNum.Location = New-Object System.Drawing.Point(18, 180)
     $daysNum.Width = 70
     $daysNum.BackColor = $btnBg
     $daysNum.ForeColor = $text
     $optBox.Controls.Add($daysNum)
 
-    $hint = New-Object System.Windows.Forms.Label
-    $hint.Text = "Logs save to Desktop\PC-Maintenance-Logs"
-    $hint.ForeColor = $muted
-    $hint.Location = New-Object System.Drawing.Point(110, 146)
-    $hint.AutoSize = $true
-    $optBox.Controls.Add($hint)
-
     $progress = New-Object System.Windows.Forms.ProgressBar
-    $progress.Location = New-Object System.Drawing.Point(24, 314)
+    $progress.Location = New-Object System.Drawing.Point(24, 334)
     $progress.Size = New-Object System.Drawing.Size(796, 22)
     $progress.Style = "Continuous"
     $progress.Anchor = "Top,Left,Right"
@@ -170,13 +179,13 @@ function Show-MaintenanceGui {
     $status = New-Object System.Windows.Forms.Label
     $status.Text = "Ready"
     $status.ForeColor = $muted
-    $status.Location = New-Object System.Drawing.Point(24, 342)
+    $status.Location = New-Object System.Drawing.Point(24, 362)
     $status.AutoSize = $true
     $form.Controls.Add($status)
 
     $log = New-Object System.Windows.Forms.RichTextBox
-    $log.Location = New-Object System.Drawing.Point(24, 370)
-    $log.Size = New-Object System.Drawing.Size(796, 160)
+    $log.Location = New-Object System.Drawing.Point(24, 390)
+    $log.Size = New-Object System.Drawing.Size(796, 140)
     $log.BackColor = [System.Drawing.Color]::FromArgb(14, 16, 20)
     $log.ForeColor = $text
     $log.Font = New-Object System.Drawing.Font("Consolas", 9)
@@ -235,6 +244,8 @@ function Show-MaintenanceGui {
         OptBox     = $optBox
         ChkRestore = $chkRestore
         ChkAmd     = $chkAmd
+        ChkWU      = $chkWU
+        ChkWinget  = $chkWinget
         DaysNum    = $daysNum
         BtnRun     = $btnRun
         BtnCli     = $btnCli
@@ -264,17 +275,24 @@ function Show-MaintenanceGui {
 
         $chkRestore = Get-GuiControl ChkRestore
         $chkAmd = Get-GuiControl ChkAmd
+        $chkWU = Get-GuiControl ChkWU
+        $chkWinget = Get-GuiControl ChkWinget
         $daysNum = Get-GuiControl DaysNum
 
         if ($mode -eq "CleanupOnly" -or $mode -eq "Repair") {
             $Script:DoRestorePoint = [bool]$chkRestore.Checked
             $Script:DoAmd = $false
+            $Script:DoWinUpdate = $false
+            $Script:DoWinget = $false
         } else {
             $Script:DoRestorePoint = [bool]$chkRestore.Checked
             $Script:DoAmd = [bool]$chkAmd.Checked
+            $Script:DoWinUpdate = [bool]$chkWU.Checked
+            $Script:DoWinget = [bool]$chkWinget.Checked
         }
 
         $Script:TempOlderThanDays = [int]$daysNum.Value
+        Append-UiLog "Tip: status timer moves during long scans - that means it is still working." "Gray"
 
         try {
             [void](Invoke-MaintenanceRun)

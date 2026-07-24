@@ -4,6 +4,8 @@ $Script:StartFree = 0
 $Script:EndFree = 0
 $Script:DoCleanup = $true
 $Script:DoUpdates = $true
+$Script:DoWinUpdate = $true
+$Script:DoWinget = $true
 $Script:DoRepair = $false
 $Script:DoRestorePoint = $true
 $Script:DoAmd = $true
@@ -14,12 +16,20 @@ $Script:StepNames = [System.Collections.Generic.List[string]]::new()
 $Script:TempOlderThanDays = 2
 $Script:Ui = $null
 $Script:CancelRequested = $false
+$Script:LastPumpUtc = [datetime]::MinValue
 
 function Pump-Ui {
     $form = Get-UiControl Form
     if ($form -and -not $form.IsDisposed) {
         [System.Windows.Forms.Application]::DoEvents()
     }
+}
+
+function Pump-UiThrottled {
+    $now = [datetime]::UtcNow
+    if (($now - $Script:LastPumpUtc).TotalMilliseconds -lt 300) { return }
+    $Script:LastPumpUtc = $now
+    Pump-Ui
 }
 
 function Get-UiControl([string]$Name) {
@@ -36,6 +46,63 @@ function Set-UiProgressValue([int]$Value) {
 function Set-UiStatusText([string]$Text) {
     $lbl = Get-UiControl Status
     if ($lbl) { $lbl.Text = $Text }
+}
+
+function Invoke-WithUiWait {
+    param(
+        [scriptblock]$ScriptBlock,
+        [string]$Activity = "Working",
+        [int]$TimeoutSec = 900,
+        [object[]]$ArgumentList = @()
+    )
+    $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $rs.Open()
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    $ps.Runspace = $rs
+    [void]$ps.AddScript($ScriptBlock)
+    foreach ($a in $ArgumentList) {
+        [void]$ps.AddArgument($a)
+    }
+    $handle = $ps.BeginInvoke()
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $spin = @('|','/','-','\')
+    $i = 0
+    try {
+        while (-not $handle.IsCompleted) {
+            if ($sw.Elapsed.TotalSeconds -ge $TimeoutSec) {
+                try { $ps.Stop() } catch { }
+                Write-Warn "$Activity timed out after ${TimeoutSec}s"
+                return $null
+            }
+            $sec = [int]$sw.Elapsed.TotalSeconds
+            $ch = $spin[$i % 4]
+            Set-UiStatusText ("[{0}] {1}... {2}s" -f $ch, $Activity, $sec)
+            Write-Host -NoNewline ("`r  [{0}] {1}... {2}s   " -f $ch, $Activity, $sec) -ForegroundColor DarkYellow
+            Pump-Ui
+            Start-Sleep -Milliseconds 200
+            $i++
+        }
+        Write-Host ""
+        $result = $ps.EndInvoke($handle)
+        if ($ps.HadErrors) {
+            foreach ($e in $ps.Streams.Error) {
+                Write-Log ("ASYNC_ERR: " + $e.ToString())
+            }
+        }
+        return $result
+    } finally {
+        $ps.Dispose()
+        $rs.Dispose()
+    }
+}
+
+function Get-AsyncResultText {
+    param($Result)
+    if ($null -eq $Result) { return $null }
+    if ($Result -is [string]) { return $Result }
+    $arr = @($Result)
+    if ($arr.Count -eq 0) { return "" }
+    return [string]$arr[-1]
 }
 
 function Ensure-Admin {
@@ -205,24 +272,24 @@ function Apply-ModeFlags {
     )
     switch ($ModeName) {
         'Full' {
-            $Script:DoCleanup=$true; $Script:DoUpdates=$true; $Script:DoRepair=$false
-            $Script:DoRestorePoint=$true; $Script:DoAmd=$true
+            $Script:DoCleanup=$true; $Script:DoUpdates=$true; $Script:DoWinUpdate=$true; $Script:DoWinget=$true
+            $Script:DoRepair=$false; $Script:DoRestorePoint=$true; $Script:DoAmd=$true
         }
         'CleanupOnly' {
-            $Script:DoCleanup=$true; $Script:DoUpdates=$false; $Script:DoRepair=$false
-            $Script:DoRestorePoint=$false; $Script:DoAmd=$false
+            $Script:DoCleanup=$true; $Script:DoUpdates=$false; $Script:DoWinUpdate=$false; $Script:DoWinget=$false
+            $Script:DoRepair=$false; $Script:DoRestorePoint=$false; $Script:DoAmd=$false
         }
         'UpdatesOnly' {
-            $Script:DoCleanup=$false; $Script:DoUpdates=$true; $Script:DoRepair=$false
-            $Script:DoRestorePoint=$true; $Script:DoAmd=$true
+            $Script:DoCleanup=$false; $Script:DoUpdates=$true; $Script:DoWinUpdate=$true; $Script:DoWinget=$true
+            $Script:DoRepair=$false; $Script:DoRestorePoint=$true; $Script:DoAmd=$true
         }
         'Repair' {
-            $Script:DoCleanup=$false; $Script:DoUpdates=$false; $Script:DoRepair=$true
-            $Script:DoRestorePoint=$true; $Script:DoAmd=$false
+            $Script:DoCleanup=$false; $Script:DoUpdates=$false; $Script:DoWinUpdate=$false; $Script:DoWinget=$false
+            $Script:DoRepair=$true; $Script:DoRestorePoint=$true; $Script:DoAmd=$false
         }
         'FullRepair' {
-            $Script:DoCleanup=$true; $Script:DoUpdates=$true; $Script:DoRepair=$true
-            $Script:DoRestorePoint=$true; $Script:DoAmd=$true
+            $Script:DoCleanup=$true; $Script:DoUpdates=$true; $Script:DoWinUpdate=$true; $Script:DoWinget=$true
+            $Script:DoRepair=$true; $Script:DoRestorePoint=$true; $Script:DoAmd=$true
         }
     }
 }
@@ -235,10 +302,8 @@ function Build-StepPlan {
         [void]$Script:StepNames.Add("Browser caches")
         [void]$Script:StepNames.Add("Recycle Bin")
     }
-    if ($Script:DoUpdates) {
-        [void]$Script:StepNames.Add("Windows Update")
-        [void]$Script:StepNames.Add("winget upgrades")
-    }
+    if ($Script:DoWinUpdate) { [void]$Script:StepNames.Add("Windows Update") }
+    if ($Script:DoWinget) { [void]$Script:StepNames.Add("winget upgrades") }
     if ($Script:DoAmd) { [void]$Script:StepNames.Add("AMD Adrenalin") }
     if ($Script:DoRepair) { [void]$Script:StepNames.Add("DISM + SFC repair") }
     [void]$Script:StepNames.Add("Health checks")
@@ -249,12 +314,24 @@ function Build-StepPlan {
 function New-MaintenanceRestorePoint {
     Write-Step "Creating System Restore Point"
     Write-Info "This usually takes 10-60 seconds..."
-    try {
-        Enable-ComputerRestore -Drive "C:\" -ErrorAction SilentlyContinue
-        Checkpoint-Computer -Description "PC Maintenance $(Get-Date -Format 'yyyy-MM-dd HH:mm')" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
+    $result = Invoke-WithUiWait -Activity "Creating restore point" -TimeoutSec 180 -ScriptBlock {
+        try {
+            Enable-ComputerRestore -Drive "C:\" -ErrorAction SilentlyContinue
+            Checkpoint-Computer -Description ("PC Maintenance " + (Get-Date -Format 'yyyy-MM-dd HH:mm')) -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
+            "OK"
+        } catch {
+            "ERR:" + $_.Exception.Message
+        }
+    }
+    $text = Get-AsyncResultText $result
+    if ($null -eq $text) {
+        Write-Warn "Restore point skipped (timeout)"
+    } elseif ($text -eq "OK") {
         Write-Ok "Restore point created"
-    } catch {
-        Write-Warn "Restore point skipped: $($_.Exception.Message)"
+    } elseif ($text -like "ERR:*") {
+        Write-Warn ("Restore point skipped: " + $text.Substring(4))
+    } else {
+        Write-Warn "Restore point skipped"
     }
 }
 
@@ -263,11 +340,13 @@ function Remove-OldFilesInPath {
     if (-not (Test-Path $Path)) { return 0 }
     $cutoff = (Get-Date).AddDays(-$OlderThanDays)
     $freed = 0L
+    $n = 0
     Get-ChildItem -Path $Path -Recurse -Force -File -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime -lt $cutoff } |
         ForEach-Object {
             try { $freed += $_.Length; Remove-Item $_.FullName -Force -ErrorAction Stop } catch { }
-            Pump-Ui
+            $n++
+            if (($n % 80) -eq 0) { Pump-UiThrottled }
         }
     if ($DeleteFoldersToo) {
         Get-ChildItem -Path $Path -Recurse -Force -Directory -ErrorAction SilentlyContinue |
@@ -413,36 +492,54 @@ function Invoke-RecycleAndCleanMgr {
 
 function Invoke-WindowsUpdate {
     Write-Step "Windows Updates"
-    Write-Info "Scan can take 1-5 minutes"
+    Write-Info "Scan runs in the background so the window stays responsive (1-5 min)"
     try {
         $have = Get-Module -ListAvailable PSWindowsUpdate -EA SilentlyContinue
         if (-not $have) {
             Write-Info "Installing PSWindowsUpdate module (one-time)..."
-            try {
-                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -EA SilentlyContinue | Out-Null
-                Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -EA SilentlyContinue
-                Install-Module PSWindowsUpdate -Force -Confirm:$false -Scope AllUsers -EA Stop
-                Write-Ok "PSWindowsUpdate installed"
-            } catch {
+            $installed = Invoke-WithUiWait -Activity "Installing update module" -TimeoutSec 300 -ScriptBlock {
+                try {
+                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -EA SilentlyContinue | Out-Null
+                    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -EA SilentlyContinue
+                    Install-Module PSWindowsUpdate -Force -Confirm:$false -Scope AllUsers -EA Stop
+                    "OK"
+                } catch {
+                    "ERR:" + $_.Exception.Message
+                }
+            }
+            $instText = Get-AsyncResultText $installed
+            if ($instText -ne "OK") {
                 Write-Warn "Module install failed - using UsoClient fallback"
                 UsoClient StartInteractiveScan 2>$null
                 Write-Ok "Windows Update scan started (check Settings > Windows Update)"
                 return
             }
+            Write-Ok "PSWindowsUpdate installed"
         }
 
-        Import-Module PSWindowsUpdate -EA SilentlyContinue
         Write-Info "Scanning for updates..."
-        $updates = @(Get-WindowsUpdate -MicrosoftUpdate -EA SilentlyContinue)
-        if ($updates.Count -gt 0) {
-            Write-Info "Found $($updates.Count) update(s). Installing..."
+        $scan = Invoke-WithUiWait -Activity "Scanning Windows Update" -TimeoutSec 600 -ScriptBlock {
+            Import-Module PSWindowsUpdate -EA SilentlyContinue
+            @(Get-WindowsUpdate -MicrosoftUpdate -EA SilentlyContinue | ForEach-Object { $_.Title })
+        }
+        if ($null -eq $scan) {
+            Write-Warn "Windows Update scan timed out / failed"
+            return
+        }
+        $titles = @($scan | Where-Object { $_ })
+        if ($titles.Count -gt 0) {
+            Write-Info ("Found {0} update(s). Installing..." -f $titles.Count)
             $n = 0
-            foreach ($u in $updates) {
+            foreach ($t in $titles) {
                 $n++
-                Write-Info ("Update {0}/{1}: {2}" -f $n, $updates.Count, $u.Title)
+                Write-Info ("Update {0}/{1}: {2}" -f $n, $titles.Count, $t)
             }
-            Get-WindowsUpdate -MicrosoftUpdate -AcceptAll -Install -IgnoreReboot -EA SilentlyContinue | Out-Null
+            $null = Invoke-WithUiWait -Activity "Installing Windows Updates" -TimeoutSec 3600 -ScriptBlock {
+                Import-Module PSWindowsUpdate -EA SilentlyContinue
+                Get-WindowsUpdate -MicrosoftUpdate -AcceptAll -Install -IgnoreReboot -EA SilentlyContinue | Out-Null
+                "OK"
+            }
             Write-Ok "Windows Updates installed (reboot may be required)"
         } else {
             Write-Ok "Windows is up to date"
@@ -455,9 +552,17 @@ function Invoke-WindowsUpdate {
 function Invoke-WingetUpdates {
     Write-Step "Upgrading apps (winget)"
     try {
-        $null = Get-Command winget -EA Stop
-        Write-Info "Scanning for app upgrades..."
-        $out = & winget upgrade --all --accept-package-agreements --accept-source-agreements --disable-interactivity --include-unknown 2>&1 | Out-String
+        $winget = (Get-Command winget -EA Stop).Source
+        Write-Info "Scanning for app upgrades (background)..."
+        $outObj = Invoke-WithUiWait -Activity "winget upgrade" -TimeoutSec 1200 -ArgumentList @($winget) -ScriptBlock {
+            param([string]$WingetPath)
+            & $WingetPath upgrade --all --accept-package-agreements --accept-source-agreements --disable-interactivity --include-unknown 2>&1 | Out-String
+        }
+        $out = Get-AsyncResultText $outObj
+        if ($null -eq $out) {
+            Write-Warn "winget timed out"
+            return
+        }
         Write-Log $out
         if ($out -match "No installed package found matching input criteria|No newer package versions") {
             Write-Ok "winget apps are up to date"
@@ -620,10 +725,8 @@ function Invoke-MaintenanceRun {
         Invoke-BrowserCacheCleanup
         Invoke-RecycleAndCleanMgr
     }
-    if ($Script:DoUpdates) {
-        Invoke-WindowsUpdate
-        Invoke-WingetUpdates
-    }
+    if ($Script:DoWinUpdate) { Invoke-WindowsUpdate }
+    if ($Script:DoWinget) { Invoke-WingetUpdates }
     if ($Script:DoAmd) { Invoke-AmdOpen }
     if ($Script:DoRepair) { Invoke-Repair }
 
