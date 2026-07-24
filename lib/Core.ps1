@@ -655,9 +655,9 @@ function Invoke-ShaderCacheCleanup {
 
 function Invoke-LauncherCacheCleanup {
     param(
-        [switch]$Steam,
-        [switch]$Epic,
-        [switch]$Riot
+        [bool]$Steam = $false,
+        [bool]$Epic = $false,
+        [bool]$Riot = $false
     )
     Write-Step "Launcher download caches"
     $total = 0L
@@ -668,7 +668,7 @@ function Invoke-LauncherCacheCleanup {
             "E:\Steam\steamapps\downloading"
         )
         foreach ($p in $steamRoots) {
-            if (-not (Test-Path $p)) { continue }
+            if (-not (Test-Path -LiteralPath $p)) { continue }
             Write-Info "Steam downloading: $p"
             $freed = Remove-OldFilesInPath -Path $p -OlderThanDays 0 -DeleteFoldersToo
             $total += $freed
@@ -681,7 +681,7 @@ function Invoke-LauncherCacheCleanup {
             "$env:LOCALAPPDATA\EpicGamesLauncher\Saved\Logs"
         )
         foreach ($p in $epic) {
-            if (-not (Test-Path $p)) { continue }
+            if (-not (Test-Path -LiteralPath $p)) { continue }
             $freed = Remove-OldFilesInPath -Path $p -OlderThanDays 0 -DeleteFoldersToo
             $total += $freed
         }
@@ -692,7 +692,7 @@ function Invoke-LauncherCacheCleanup {
             "$env:LOCALAPPDATA\Riot Games\Riot Client\Logs"
         )
         foreach ($p in $riot) {
-            if (-not (Test-Path $p)) { continue }
+            if (-not (Test-Path -LiteralPath $p)) { continue }
             $freed = Remove-OldFilesInPath -Path $p -OlderThanDays 0 -DeleteFoldersToo
             $total += $freed
         }

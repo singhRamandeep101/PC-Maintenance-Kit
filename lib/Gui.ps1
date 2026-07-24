@@ -475,7 +475,10 @@ function Show-MaintenanceGui {
             Invoke-RecycleAndCleanMgr
             if ($Script:GuiControls.ChkCleanShader.Checked) { Invoke-ShaderCacheCleanup }
             if ($Script:GuiControls.ChkSteam.Checked -or $Script:GuiControls.ChkEpic.Checked -or $Script:GuiControls.ChkRiot.Checked) {
-                Invoke-LauncherCacheCleanup -Steam:$Script:GuiControls.ChkSteam.Checked -Epic:$Script:GuiControls.ChkEpic.Checked -Riot:$Script:GuiControls.ChkRiot.Checked
+                $doSteam = [bool]$Script:GuiControls.ChkSteam.Checked
+                $doEpic  = [bool]$Script:GuiControls.ChkEpic.Checked
+                $doRiot  = [bool]$Script:GuiControls.ChkRiot.Checked
+                Invoke-LauncherCacheCleanup -Steam:$doSteam -Epic:$doEpic -Riot:$doRiot
             }
             Append-UiLog "Cleanup finished." "Green"
         }
