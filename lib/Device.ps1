@@ -7,10 +7,12 @@ function Get-InstalledRamPartNumbers {
 
 function Get-RamUpgradeTip {
     $s = Get-DeviceSummary
-    $parts = Get-InstalledRamPartNumbers
-    $part = if ($parts.Count) { $parts[0] } else { $null }
+    $parts = @(Get-InstalledRamPartNumbers)
+    $part = $null
+    if ($parts.Count -ge 1) { $part = [string]$parts[0] }
+    if (-not $part -and $s.RamPartNumber) { $part = [string]$s.RamPartNumber }
     if ($s.RamChannels -match 'Single' -or $s.RamSticks -eq 1) {
-        if ($part) {
+        if ($part -and $part.Length -gt 2) {
             return "You have 1 stick ($part). Buy a matching second stick of the same model for dual-channel. Search: $part"
         }
         return "You have single-channel RAM. Add a matching second stick (same size/speed) for dual-channel - big gaming 1% lows win."
