@@ -6,6 +6,13 @@ $Script:ContentPanels = @{}
 $Script:NavButtons = @{}
 $Script:NavIcons = @{}
 
+function Enable-DoubleBuffer($Control) {
+    try {
+        $prop = $Control.GetType().GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance,NonPublic')
+        if ($prop) { $prop.SetValue($Control, $true, $null) }
+    } catch { }
+}
+
 function Get-GuiTheme {
     return @{
         Bg        = [System.Drawing.Color]::FromArgb(15, 23, 30)
@@ -167,31 +174,31 @@ function New-MetricCard {
     )
     $t = $Script:Theme
     $card = New-Object System.Windows.Forms.Panel
-    $card.Height = 78
+    $card.Height = 82
     $card.Dock = "Top"
     $card.Padding = New-Object System.Windows.Forms.Padding(0, 0, 0, 10)
     $card.BackColor = $t.Bg
+    Enable-DoubleBuffer $card
 
     $inner = New-Object System.Windows.Forms.Panel
     $inner.Dock = "Fill"
     $inner.BackColor = $t.Panel
     Add-PanelBorder $inner $t.Border
+    Enable-DoubleBuffer $inner
     $card.Controls.Add($inner)
 
     $iconBox = New-Object System.Windows.Forms.Panel
-    $iconBox.Location = New-Object System.Drawing.Point(14, 12)
+    $iconBox.Location = New-Object System.Drawing.Point(14, 14)
     $iconBox.Size = New-Object System.Drawing.Size(44, 44)
     $iconBox.BackColor = $t.IconBox
     Add-PanelBorder $iconBox $t.Border
     $inner.Controls.Add($iconBox)
 
-    $icon = New-Object System.Windows.Forms.Label
-    $icon.Text = (Get-Mdl2Char $Glyph)
-    $icon.Font = New-Object System.Drawing.Font("Segoe MDL2 Assets", 14)
-    $icon.ForeColor = $t.Accent
-    $icon.AutoSize = $true
-    $icon.Location = New-Object System.Drawing.Point(10, 10)
-    $iconBox.Controls.Add($icon)
+    $accentDot = New-Object System.Windows.Forms.Panel
+    $accentDot.Size = New-Object System.Drawing.Size(14, 14)
+    $accentDot.Location = New-Object System.Drawing.Point(15, 15)
+    $accentDot.BackColor = $t.Accent
+    $iconBox.Controls.Add($accentDot)
 
     $titleLbl = New-Object System.Windows.Forms.Label
     $titleLbl.Text = $Title
@@ -251,6 +258,7 @@ function New-GameStatusRow {
     $row.Height = 52
     $row.Dock = "Top"
     $row.BackColor = $t.Panel
+    Enable-DoubleBuffer $row
 
     $iconBox = New-Object System.Windows.Forms.Panel
     $iconBox.Location = New-Object System.Drawing.Point(8, 8)
@@ -259,13 +267,11 @@ function New-GameStatusRow {
     Add-PanelBorder $iconBox $t.Border
     $row.Controls.Add($iconBox)
 
-    $icon = New-Object System.Windows.Forms.Label
-    $icon.Text = (Get-Mdl2Char $Glyph)
-    $icon.Font = New-Object System.Drawing.Font("Segoe MDL2 Assets", 11)
-    $icon.ForeColor = $t.Accent
-    $icon.AutoSize = $true
-    $icon.Location = New-Object System.Drawing.Point(8, 8)
-    $iconBox.Controls.Add($icon)
+    $accentDot = New-Object System.Windows.Forms.Panel
+    $accentDot.Size = New-Object System.Drawing.Size(10, 10)
+    $accentDot.Location = New-Object System.Drawing.Point(13, 13)
+    $accentDot.BackColor = $t.Accent
+    $iconBox.Controls.Add($accentDot)
 
     $titleLbl = New-Object System.Windows.Forms.Label
     $titleLbl.Text = $Title
@@ -306,9 +312,6 @@ function Set-ActiveNav([string]$Name) {
         $btn.ForeColor = if ($isActive) { $t.Accent } else { $t.Muted }
         $btn.Tag = if ($isActive) { "active" } else { "idle" }
         $btn.Invalidate()
-        if ($Script:NavIcons.ContainsKey($key)) {
-            $Script:NavIcons[$key].ForeColor = if ($isActive) { $t.Accent } else { $t.Muted }
-        }
     }
     foreach ($key in $Script:ContentPanels.Keys) {
         $Script:ContentPanels[$key].Visible = ($key -eq $Name)
@@ -460,35 +463,29 @@ function Show-MaintenanceGui {
     $form.ForeColor = $t.Text
     $form.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
     $form.MinimumSize = New-Object System.Drawing.Size(980, 720)
+    Enable-DoubleBuffer $form
 
     # ---- HEADER (Dock Top) ----
     $header = New-Object System.Windows.Forms.Panel
     $header.Dock = "Top"
     $header.Height = 118
     $header.BackColor = $t.Header
+    Enable-DoubleBuffer $header
     $form.Controls.Add($header)
-
-    $brandIcon = New-Object System.Windows.Forms.Label
-    $brandIcon.Text = (Get-Mdl2Char 'E7FC')
-    $brandIcon.Font = New-Object System.Drawing.Font("Segoe MDL2 Assets", 16)
-    $brandIcon.ForeColor = $t.Accent
-    $brandIcon.AutoSize = $true
-    $brandIcon.Location = New-Object System.Drawing.Point(22, 16)
-    $header.Controls.Add($brandIcon)
 
     $brand = New-Object System.Windows.Forms.Label
     $brand.Text = "PC Maintenance Kit"
     $brand.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 15)
     $brand.ForeColor = $t.Text
     $brand.AutoSize = $true
-    $brand.Location = New-Object System.Drawing.Point(52, 14)
+    $brand.Location = New-Object System.Drawing.Point(24, 14)
     $header.Controls.Add($brand)
 
     $ver = New-Object System.Windows.Forms.Label
     $ver.Text = "v5.1  ·  Gamer Toolkit"
     $ver.ForeColor = $t.Accent
     $ver.AutoSize = $true
-    $ver.Location = New-Object System.Drawing.Point(54, 42)
+    $ver.Location = New-Object System.Drawing.Point(26, 42)
     $header.Controls.Add($ver)
 
     $freeLbl = New-Object System.Windows.Forms.Label
@@ -513,39 +510,13 @@ function Show-MaintenanceGui {
         $rebootBadge.Left = [math]::Max(700, $sender.ClientSize.Width - 220)
     })
 
-    $navDefs = @(
-        @{ Name = 'Home'; Glyph = 'E80F' }
-        @{ Name = 'Cleanup'; Glyph = 'EA99' }
-        @{ Name = 'Updates'; Glyph = 'E895' }
-        @{ Name = 'Gaming'; Glyph = 'E7FC' }
-        @{ Name = 'Repair'; Glyph = 'E90F' }
-        @{ Name = 'Device'; Glyph = 'E975' }
-    )
+    $navNames = @('Home','Cleanup','Updates','Gaming','Repair','Device')
     $navX = 24
-    foreach ($def in $navDefs) {
-        $name = $def.Name
-        $wrap = New-Object System.Windows.Forms.Panel
-        $wrap.Location = New-Object System.Drawing.Point($navX, 68)
-        $wrap.Size = New-Object System.Drawing.Size(108, 44)
-        $wrap.BackColor = $t.Header
-        $wrap.Cursor = [System.Windows.Forms.Cursors]::Hand
-        $wrap.Tag = $name
-        $header.Controls.Add($wrap)
-
-        $ico = New-Object System.Windows.Forms.Label
-        $ico.Text = (Get-Mdl2Char $def.Glyph)
-        $ico.Font = New-Object System.Drawing.Font("Segoe MDL2 Assets", 11)
-        $ico.ForeColor = $t.Muted
-        $ico.AutoSize = $true
-        $ico.Location = New-Object System.Drawing.Point(8, 4)
-        $ico.Cursor = [System.Windows.Forms.Cursors]::Hand
-        $ico.Tag = $name
-        $wrap.Controls.Add($ico)
-
+    foreach ($name in $navNames) {
         $nb = New-Object System.Windows.Forms.Button
         $nb.Text = $name
-        $nb.Location = New-Object System.Drawing.Point(28, 2)
-        $nb.Size = New-Object System.Drawing.Size(78, 36)
+        $nb.Location = New-Object System.Drawing.Point($navX, 70)
+        $nb.Size = New-Object System.Drawing.Size(100, 36)
         $nb.FlatStyle = "Flat"
         $nb.FlatAppearance.BorderSize = 0
         $nb.BackColor = $t.Header
@@ -553,7 +524,7 @@ function Show-MaintenanceGui {
         $nb.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5)
         $nb.Cursor = [System.Windows.Forms.Cursors]::Hand
         $nb.Tag = "idle"
-        $nb.TextAlign = "MiddleLeft"
+        $nb.TextAlign = "MiddleCenter"
         $nb.Add_Click({
             param($sender, $e)
             Set-ActiveNav ([string]$sender.Text)
@@ -563,22 +534,13 @@ function Show-MaintenanceGui {
             if ($sender.Tag -eq "active") {
                 $pen = New-Object System.Drawing.Pen $Script:Theme.Accent, 3
                 $y = $sender.Height - 2
-                $e.Graphics.DrawLine($pen, 0, $y, ($sender.Width - 4), $y)
+                $e.Graphics.DrawLine($pen, 10, $y, ($sender.Width - 10), $y)
                 $pen.Dispose()
             }
         })
-        $wrap.Controls.Add($nb)
-
-        $navClick = {
-            param($sender, $e)
-            Set-ActiveNav ([string]$sender.Tag)
-        }
-        $wrap.Add_Click($navClick)
-        $ico.Add_Click($navClick)
-
+        $header.Controls.Add($nb)
         $Script:NavButtons[$name] = $nb
-        $Script:NavIcons[$name] = $ico
-        $navX += 112
+        $navX += 104
     }
 
     # ---- FOOTER HOST (Dock Bottom) ----
@@ -803,10 +765,8 @@ function Show-MaintenanceGui {
     $chkHomeWinget = New-PremiumCheck "winget app upgrades (slow)" (New-Object System.Drawing.Point(20, 184)) $false
     $cardOpts.Controls.AddRange(@($chkHomeRestore, $chkHomeShader, $chkHomeGaming, $chkHomeWU, $chkHomeWinget))
 
-    $btnWeekly = New-PremiumButton "  Run Weekly Full" (New-Object System.Drawing.Point(20, 236)) (New-Object System.Drawing.Size(240, 48)) "Cta"
-    $btnRefreshHome = New-PremiumButton "Refresh" (New-Object System.Drawing.Point(272, 236)) (New-Object System.Drawing.Size(100, 48)) "Ghost"
-    $btnWeekly.Anchor = "Bottom,Left"
-    $btnRefreshHome.Anchor = "Bottom,Left"
+    $btnWeekly = New-PremiumButton "Run Weekly Full" (New-Object System.Drawing.Point(20, 236)) (New-Object System.Drawing.Size(250, 48)) "Cta"
+    $btnRefreshHome = New-PremiumButton "Refresh" (New-Object System.Drawing.Point(282, 236)) (New-Object System.Drawing.Size(110, 48)) "Ghost"
     $cardOpts.Controls.AddRange(@($btnWeekly, $btnRefreshHome))
 
     $nextLbl = New-Object System.Windows.Forms.Label
@@ -814,13 +774,16 @@ function Show-MaintenanceGui {
     $nextLbl.ForeColor = $t.Muted
     $nextLbl.Location = New-Object System.Drawing.Point(20, 292)
     $nextLbl.AutoSize = $true
-    $nextLbl.Anchor = "Bottom,Left"
     $cardOpts.Controls.Add($nextLbl)
 
     $cardOpts.Add_Resize({
         param($sender, $e)
-        $btnWeekly.Top = $sender.ClientSize.Height - 84
-        $btnRefreshHome.Top = $sender.ClientSize.Height - 84
+        $y = $sender.ClientSize.Height - 84
+        $btnWeekly.Top = $y
+        $btnRefreshHome.Top = $y
+        $btnWeekly.Width = [math]::Max(180, $sender.ClientSize.Width - 160)
+        $btnRefreshHome.Left = $btnWeekly.Left + $btnWeekly.Width + 12
+        $btnRefreshHome.Width = 110
         $nextLbl.Top = $sender.ClientSize.Height - 28
     })
 
