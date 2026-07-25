@@ -3,24 +3,41 @@ $Script:LastJobText = "Ready"
 $Script:Theme = $null
 $Script:ContentPanels = @{}
 $Script:NavButtons = @{}
+$Script:NavIcons = @{}
 
 function Get-GuiTheme {
     return @{
-        Bg       = [System.Drawing.Color]::FromArgb(15, 23, 30)
-        Header   = [System.Drawing.Color]::FromArgb(18, 28, 36)
-        Panel    = [System.Drawing.Color]::FromArgb(24, 34, 44)
-        PanelAlt = [System.Drawing.Color]::FromArgb(30, 42, 54)
-        Border   = [System.Drawing.Color]::FromArgb(40, 56, 70)
-        Accent   = [System.Drawing.Color]::FromArgb(38, 198, 168)
-        AccentDim= [System.Drawing.Color]::FromArgb(28, 140, 120)
-        Success  = [System.Drawing.Color]::FromArgb(56, 200, 120)
-        Warn     = [System.Drawing.Color]::FromArgb(210, 140, 60)
-        Danger   = [System.Drawing.Color]::FromArgb(190, 70, 70)
-        Text     = [System.Drawing.Color]::FromArgb(235, 240, 245)
-        Muted    = [System.Drawing.Color]::FromArgb(130, 148, 162)
-        LogBg    = [System.Drawing.Color]::FromArgb(8, 12, 16)
-        BtnGhost = [System.Drawing.Color]::FromArgb(28, 40, 52)
+        Bg        = [System.Drawing.Color]::FromArgb(15, 23, 30)
+        Header    = [System.Drawing.Color]::FromArgb(18, 28, 36)
+        Panel     = [System.Drawing.Color]::FromArgb(22, 33, 43)
+        PanelAlt  = [System.Drawing.Color]::FromArgb(30, 42, 54)
+        Border    = [System.Drawing.Color]::FromArgb(40, 56, 70)
+        Accent    = [System.Drawing.Color]::FromArgb(38, 198, 168)
+        AccentDim = [System.Drawing.Color]::FromArgb(28, 140, 120)
+        Cta       = [System.Drawing.Color]::FromArgb(46, 125, 50)
+        CtaHover  = [System.Drawing.Color]::FromArgb(56, 142, 60)
+        Success   = [System.Drawing.Color]::FromArgb(56, 200, 120)
+        Warn      = [System.Drawing.Color]::FromArgb(210, 140, 60)
+        Danger    = [System.Drawing.Color]::FromArgb(190, 70, 70)
+        Text      = [System.Drawing.Color]::FromArgb(235, 240, 245)
+        Muted     = [System.Drawing.Color]::FromArgb(130, 148, 162)
+        LogBg     = [System.Drawing.Color]::FromArgb(8, 12, 16)
+        BtnGhost  = [System.Drawing.Color]::FromArgb(28, 40, 52)
+        IconBox   = [System.Drawing.Color]::FromArgb(18, 28, 36)
     }
+}
+
+function Add-PanelBorder {
+    param($Panel, $Color = $null, [int]$Width = 1)
+    $Panel.Add_Paint({
+        param($sender, $e)
+        $c = if ($sender.Tag -is [System.Drawing.Color]) { $sender.Tag } else { $Script:Theme.Border }
+        $pen = New-Object System.Drawing.Pen $c, $Width
+        $rect = New-Object System.Drawing.Rectangle 0, 0, ($sender.Width - 1), ($sender.Height - 1)
+        $e.Graphics.DrawRectangle($pen, $rect)
+        $pen.Dispose()
+    })
+    if ($Color) { $Panel.Tag = $Color }
 }
 
 function Update-GuiStatusBar {
@@ -61,6 +78,12 @@ function New-PremiumButton {
     $b.Cursor = [System.Windows.Forms.Cursors]::Hand
     $b.FlatAppearance.BorderSize = 0
     switch ($Style) {
+        'Cta' {
+            $b.BackColor = $t.Cta
+            $b.ForeColor = [System.Drawing.Color]::White
+            $b.FlatAppearance.MouseOverBackColor = $t.CtaHover
+            $b.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 11)
+        }
         'Primary' {
             $b.BackColor = $t.Accent
             $b.ForeColor = [System.Drawing.Color]::FromArgb(10, 20, 24)
@@ -116,7 +139,7 @@ function New-CardPanel {
     $p.Location = $Location
     $p.Size = $Size
     $p.BackColor = $t.Panel
-    $p.Padding = New-Object System.Windows.Forms.Padding(14)
+    Add-PanelBorder $p $t.Border
     if ($Title) {
         $lbl = New-Object System.Windows.Forms.Label
         $lbl.Text = $Title
@@ -129,6 +152,125 @@ function New-CardPanel {
     return $p
 }
 
+function New-MetricCard {
+    param(
+        [System.Drawing.Point]$Location,
+        [System.Drawing.Size]$Size,
+        [string]$Glyph,
+        [string]$Title
+    )
+    $t = $Script:Theme
+    $card = New-Object System.Windows.Forms.Panel
+    $card.Location = $Location
+    $card.Size = $Size
+    $card.BackColor = $t.Panel
+    Add-PanelBorder $card $t.Border
+
+    $iconBox = New-Object System.Windows.Forms.Panel
+    $iconBox.Location = New-Object System.Drawing.Point(14, 16)
+    $iconBox.Size = New-Object System.Drawing.Size(44, 44)
+    $iconBox.BackColor = $t.IconBox
+    Add-PanelBorder $iconBox $t.Border
+    $card.Controls.Add($iconBox)
+
+    $icon = New-Object System.Windows.Forms.Label
+    $icon.Text = [char][int]"0x$Glyph"
+    $icon.Font = New-Object System.Drawing.Font("Segoe MDL2 Assets", 14)
+    $icon.ForeColor = $t.Accent
+    $icon.AutoSize = $true
+    $icon.Location = New-Object System.Drawing.Point(10, 10)
+    $iconBox.Controls.Add($icon)
+
+    $titleLbl = New-Object System.Windows.Forms.Label
+    $titleLbl.Text = $Title
+    $titleLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 8.5)
+    $titleLbl.ForeColor = $t.Muted
+    $titleLbl.AutoSize = $true
+    $titleLbl.Location = New-Object System.Drawing.Point(72, 12)
+    $card.Controls.Add($titleLbl)
+
+    $mainLbl = New-Object System.Windows.Forms.Label
+    $mainLbl.Text = "-"
+    $mainLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
+    $mainLbl.ForeColor = $t.Text
+    $mainLbl.Location = New-Object System.Drawing.Point(72, 32)
+    $mainLbl.Size = New-Object System.Drawing.Size(300, 40)
+    $card.Controls.Add($mainLbl)
+
+    $statLbl = New-Object System.Windows.Forms.Label
+    $statLbl.Text = ""
+    $statLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5)
+    $statLbl.ForeColor = $t.Accent
+    $statLbl.TextAlign = "MiddleRight"
+    $statLbl.Location = New-Object System.Drawing.Point(($Size.Width - 170), 22)
+    $statLbl.Size = New-Object System.Drawing.Size(150, 36)
+    $card.Controls.Add($statLbl)
+
+    return [pscustomobject]@{
+        Panel = $card
+        Main  = $mainLbl
+        Stat  = $statLbl
+    }
+}
+
+function New-GameStatusRow {
+    param(
+        [System.Drawing.Point]$Location,
+        [int]$Width,
+        [string]$Glyph,
+        [string]$Title
+    )
+    $t = $Script:Theme
+    $row = New-Object System.Windows.Forms.Panel
+    $row.Location = $Location
+    $row.Size = New-Object System.Drawing.Size($Width, 52)
+    $row.BackColor = $t.Panel
+
+    $iconBox = New-Object System.Windows.Forms.Panel
+    $iconBox.Location = New-Object System.Drawing.Point(8, 8)
+    $iconBox.Size = New-Object System.Drawing.Size(36, 36)
+    $iconBox.BackColor = $t.IconBox
+    Add-PanelBorder $iconBox $t.Border
+    $row.Controls.Add($iconBox)
+
+    $icon = New-Object System.Windows.Forms.Label
+    $icon.Text = [char][int]"0x$Glyph"
+    $icon.Font = New-Object System.Drawing.Font("Segoe MDL2 Assets", 11)
+    $icon.ForeColor = $t.Accent
+    $icon.AutoSize = $true
+    $icon.Location = New-Object System.Drawing.Point(8, 8)
+    $iconBox.Controls.Add($icon)
+
+    $titleLbl = New-Object System.Windows.Forms.Label
+    $titleLbl.Text = $Title
+    $titleLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
+    $titleLbl.ForeColor = $t.Text
+    $titleLbl.AutoSize = $true
+    $titleLbl.Location = New-Object System.Drawing.Point(56, 16)
+    $row.Controls.Add($titleLbl)
+
+    $valLbl = New-Object System.Windows.Forms.Label
+    $valLbl.Text = "-"
+    $valLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
+    $valLbl.ForeColor = $t.Muted
+    $valLbl.TextAlign = "MiddleRight"
+    $valLbl.Location = New-Object System.Drawing.Point(($Width - 220), 14)
+    $valLbl.Size = New-Object System.Drawing.Size(200, 24)
+    $row.Controls.Add($valLbl)
+
+    $row.Add_Paint({
+        param($sender, $e)
+        $pen = New-Object System.Drawing.Pen $Script:Theme.Border, 1
+        $e.Graphics.DrawLine($pen, 8, ($sender.Height - 1), ($sender.Width - 8), ($sender.Height - 1))
+        $pen.Dispose()
+    })
+
+    return [pscustomobject]@{
+        Panel = $row
+        Value = $valLbl
+    }
+}
+
 function Set-ActiveNav([string]$Name) {
     $t = $Script:Theme
     foreach ($key in $Script:NavButtons.Keys) {
@@ -137,6 +279,9 @@ function Set-ActiveNav([string]$Name) {
         $btn.ForeColor = if ($isActive) { $t.Accent } else { $t.Muted }
         $btn.Tag = if ($isActive) { "active" } else { "idle" }
         $btn.Invalidate()
+        if ($Script:NavIcons.ContainsKey($key)) {
+            $Script:NavIcons[$key].ForeColor = if ($isActive) { $t.Accent } else { $t.Muted }
+        }
     }
     foreach ($key in $Script:ContentPanels.Keys) {
         $Script:ContentPanels[$key].Visible = ($key -eq $Name)
@@ -190,36 +335,35 @@ function Invoke-GuiAction {
 }
 
 function Update-GuiHomeSummary {
-    $box = $Script:GuiControls.HomeSummary
-    if (-not $box) { return }
     try {
         $s = Get-DeviceSummary
-        $lines = @(
-            "CPU",
-            "  $($s.Cpu)",
-            "",
-            "GPU",
-            "  $($s.Gpu)",
-            "",
-            "RAM",
-            "  $($s.RamGb) GB  ·  $($s.RamSticks) stick(s)",
-            "  $($s.RamChannels)",
-            $(if ($s.RamPartNumber) { "  $($s.RamPartNumber)" } else { "" }),
-            "",
-            "STORAGE",
-            "  $($s.DiskName)  [$($s.DiskHealth)]",
-            "  C: free $($s.FreeGb) GB",
-            "",
-            "POWER",
-            "  $($s.PowerPlan)"
-        ) | Where-Object { $_ -ne $null }
-        $box.Text = ($lines -join "`r`n")
-    } catch {
-        $box.Text = "Could not read device summary."
-    }
+        if ($Script:GuiControls.CpuMain) {
+            $Script:GuiControls.CpuMain.Text = $s.Cpu
+            $Script:GuiControls.CpuStat.Text = "Ready"
+        }
+        if ($Script:GuiControls.GpuMain) {
+            $Script:GuiControls.GpuMain.Text = $s.Gpu
+            $Script:GuiControls.GpuStat.Text = "Ready"
+        }
+        if ($Script:GuiControls.RamMain) {
+            $part = if ($s.RamPartNumber) { $s.RamPartNumber } else { "" }
+            $line = "{0} GB  ·  {1} stick(s)" -f $s.RamGb, $s.RamSticks
+            if ($part) { $line = "$line`n$part" }
+            $Script:GuiControls.RamMain.Text = $line
+            $Script:GuiControls.RamStat.Text = $s.RamChannels
+            $t = $Script:Theme
+            if ($s.RamChannels -match 'Single') {
+                $Script:GuiControls.RamStat.ForeColor = $t.Warn
+            } else {
+                $Script:GuiControls.RamStat.ForeColor = $t.Accent
+            }
+        }
+    } catch { }
+
     try {
         $Script:GuiControls.Free.Text = ("C: free {0} GB" -f (Get-CFreeGB))
     } catch { }
+
     $badge = $Script:GuiControls.RebootBadge
     if ($badge) {
         $t = $Script:Theme
@@ -237,7 +381,6 @@ function Update-GuiDevicePanel {
     $box = $Script:GuiControls.DeviceSummary
     if (-not $box) { return }
     try {
-        $s = Get-DeviceSummary
         $box.Text = Format-DeviceSummaryText
     } catch {
         $box.Text = "Unavailable"
@@ -245,8 +388,6 @@ function Update-GuiDevicePanel {
 }
 
 function Update-GuiGamingStatus {
-    $box = $Script:GuiControls.GamingStatus
-    if (-not $box) { return }
     $t = $Script:Theme
     $gm = Get-GameModeEnabled
     $dvr = Get-GameDvrEnabled
@@ -254,18 +395,22 @@ function Update-GuiGamingStatus {
     $power = Get-ActivePowerPlanName
     $discord = Get-DiscordHardwareAcceleration
 
+    function Set-StatusVal($ctrl, $text, $good) {
+        if (-not $ctrl) { return }
+        $ctrl.Text = $text
+        $ctrl.ForeColor = if ($good) { $t.Accent } else { $t.Muted }
+    }
+
     $gmText = if ($null -eq $gm) { "Unknown" } elseif ($gm -eq 1) { "On" } else { "Off" }
     $dvrText = if ($null -eq $dvr) { "Unknown" } elseif ($dvr -eq 0) { "Off" } else { "On" }
     $reliveText = if ($null -eq $relive) { "N/A" } elseif ($relive -eq 0) { "Off" } else { "On" }
     $discordText = if ($null -eq $discord) { "Not found" } elseif ($discord) { "On" } else { "Off" }
 
-    $box.Text = @(
-        ("Game Mode".PadRight(22) + $gmText)
-        ("Xbox Game DVR".PadRight(22) + $dvrText)
-        ("AMD ReLive".PadRight(22) + $reliveText)
-        ("Power plan".PadRight(22) + $power)
-        ("Discord HW accel".PadRight(22) + $discordText)
-    ) -join "`r`n"
+    Set-StatusVal $Script:GuiControls.GameModeVal $gmText ($gmText -eq "On")
+    Set-StatusVal $Script:GuiControls.GameDvrVal $dvrText ($dvrText -eq "Off")
+    Set-StatusVal $Script:GuiControls.ReLiveVal $reliveText ($reliveText -eq "Off" -or $reliveText -eq "N/A")
+    Set-StatusVal $Script:GuiControls.PowerVal $power ($power -match 'Ultimate|High')
+    Set-StatusVal $Script:GuiControls.DiscordVal $discordText ($discordText -eq "Off")
 }
 
 function Show-MaintenanceGui {
@@ -275,37 +420,47 @@ function Show-MaintenanceGui {
 
     $Script:Theme = Get-GuiTheme
     $t = $Script:Theme
+    $Script:ContentPanels = @{}
+    $Script:NavButtons = @{}
+    $Script:NavIcons = @{}
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "PC Maintenance Kit v5.1"
-    $form.Size = New-Object System.Drawing.Size(1040, 760)
+    $form.Size = New-Object System.Drawing.Size(1060, 780)
     $form.StartPosition = "CenterScreen"
     $form.BackColor = $t.Bg
     $form.ForeColor = $t.Text
     $form.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
-    $form.MinimumSize = New-Object System.Drawing.Size(960, 700)
+    $form.MinimumSize = New-Object System.Drawing.Size(980, 720)
 
-    # Header
     $header = New-Object System.Windows.Forms.Panel
     $header.Location = New-Object System.Drawing.Point(0, 0)
-    $header.Size = New-Object System.Drawing.Size(1040, 108)
+    $header.Size = New-Object System.Drawing.Size(1060, 118)
     $header.BackColor = $t.Header
     $header.Anchor = "Top,Left,Right"
     $form.Controls.Add($header)
+
+    $brandIcon = New-Object System.Windows.Forms.Label
+    $brandIcon.Text = [char]0xE90F
+    $brandIcon.Font = New-Object System.Drawing.Font("Segoe MDL2 Assets", 16)
+    $brandIcon.ForeColor = $t.Accent
+    $brandIcon.AutoSize = $true
+    $brandIcon.Location = New-Object System.Drawing.Point(22, 16)
+    $header.Controls.Add($brandIcon)
 
     $brand = New-Object System.Windows.Forms.Label
     $brand.Text = "PC Maintenance Kit"
     $brand.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 15)
     $brand.ForeColor = $t.Text
     $brand.AutoSize = $true
-    $brand.Location = New-Object System.Drawing.Point(24, 14)
+    $brand.Location = New-Object System.Drawing.Point(52, 14)
     $header.Controls.Add($brand)
 
     $ver = New-Object System.Windows.Forms.Label
     $ver.Text = "v5.1  ·  Gamer Toolkit"
     $ver.ForeColor = $t.Accent
     $ver.AutoSize = $true
-    $ver.Location = New-Object System.Drawing.Point(24, 44)
+    $ver.Location = New-Object System.Drawing.Point(54, 42)
     $header.Controls.Add($ver)
 
     $freeLbl = New-Object System.Windows.Forms.Label
@@ -313,25 +468,48 @@ function Show-MaintenanceGui {
     $freeLbl.ForeColor = $t.Accent
     $freeLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5)
     $freeLbl.AutoSize = $true
-    $freeLbl.Location = New-Object System.Drawing.Point(780, 18)
+    $freeLbl.Location = New-Object System.Drawing.Point(800, 16)
     $freeLbl.Anchor = "Top,Right"
     $header.Controls.Add($freeLbl)
 
     $rebootBadge = New-Object System.Windows.Forms.Label
     $rebootBadge.Text = "..."
     $rebootBadge.AutoSize = $true
-    $rebootBadge.Location = New-Object System.Drawing.Point(780, 42)
+    $rebootBadge.Location = New-Object System.Drawing.Point(800, 40)
     $rebootBadge.Anchor = "Top,Right"
     $header.Controls.Add($rebootBadge)
 
-    # Custom nav
-    $navNames = @('Home','Cleanup','Updates','Gaming','Repair','Device')
+    $navDefs = @(
+        @{ Name = 'Home'; Glyph = 'E80F' }
+        @{ Name = 'Cleanup'; Glyph = 'EA99' }
+        @{ Name = 'Updates'; Glyph = 'E895' }
+        @{ Name = 'Gaming'; Glyph = 'E7FC' }
+        @{ Name = 'Repair'; Glyph = 'E90F' }
+        @{ Name = 'Device'; Glyph = 'E770' }
+    )
     $navX = 24
-    foreach ($name in $navNames) {
+    foreach ($def in $navDefs) {
+        $name = $def.Name
+        $wrap = New-Object System.Windows.Forms.Panel
+        $wrap.Location = New-Object System.Drawing.Point($navX, 68)
+        $wrap.Size = New-Object System.Drawing.Size(108, 44)
+        $wrap.BackColor = $t.Header
+        $wrap.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $header.Controls.Add($wrap)
+
+        $ico = New-Object System.Windows.Forms.Label
+        $ico.Text = [char][int]("0x$($def.Glyph)")
+        $ico.Font = New-Object System.Drawing.Font("Segoe MDL2 Assets", 11)
+        $ico.ForeColor = $t.Muted
+        $ico.AutoSize = $true
+        $ico.Location = New-Object System.Drawing.Point(8, 4)
+        $ico.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $wrap.Controls.Add($ico)
+
         $nb = New-Object System.Windows.Forms.Button
         $nb.Text = $name
-        $nb.Location = New-Object System.Drawing.Point($navX, 70)
-        $nb.Size = New-Object System.Drawing.Size(100, 32)
+        $nb.Location = New-Object System.Drawing.Point(28, 2)
+        $nb.Size = New-Object System.Drawing.Size(78, 36)
         $nb.FlatStyle = "Flat"
         $nb.FlatAppearance.BorderSize = 0
         $nb.BackColor = $t.Header
@@ -339,6 +517,7 @@ function Show-MaintenanceGui {
         $nb.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5)
         $nb.Cursor = [System.Windows.Forms.Cursors]::Hand
         $nb.Tag = "idle"
+        $nb.TextAlign = "MiddleLeft"
         $nb.Add_Click({
             param($sender, $e)
             Set-ActiveNav ([string]$sender.Text)
@@ -346,21 +525,29 @@ function Show-MaintenanceGui {
         $nb.Add_Paint({
             param($sender, $e)
             if ($sender.Tag -eq "active") {
-                $pen = New-Object System.Drawing.Pen $Script:Theme.Accent, 2
-                $y = $sender.Height - 3
-                $e.Graphics.DrawLine($pen, 12, $y, ($sender.Width - 12), $y)
+                $pen = New-Object System.Drawing.Pen $Script:Theme.Accent, 3
+                $y = $sender.Height - 2
+                $e.Graphics.DrawLine($pen, 0, $y, ($sender.Width - 4), $y)
                 $pen.Dispose()
             }
         })
-        $header.Controls.Add($nb)
+        $wrap.Controls.Add($nb)
+
+        $clickNav = {
+            param($sender, $e)
+            Set-ActiveNav $name
+        }.GetNewClosure()
+        $wrap.Add_Click($clickNav)
+        $ico.Add_Click($clickNav)
+
         $Script:NavButtons[$name] = $nb
-        $navX += 108
+        $Script:NavIcons[$name] = $ico
+        $navX += 112
     }
 
-    # Content host
     $hostPanel = New-Object System.Windows.Forms.Panel
-    $hostPanel.Location = New-Object System.Drawing.Point(0, 108)
-    $hostPanel.Size = New-Object System.Drawing.Size(1040, 360)
+    $hostPanel.Location = New-Object System.Drawing.Point(0, 118)
+    $hostPanel.Size = New-Object System.Drawing.Size(1060, 360)
     $hostPanel.BackColor = $t.Bg
     $hostPanel.Anchor = "Top,Bottom,Left,Right"
     $form.Controls.Add($hostPanel)
@@ -368,7 +555,7 @@ function Show-MaintenanceGui {
     function New-Content([string]$Name) {
         $p = New-Object System.Windows.Forms.Panel
         $p.Location = New-Object System.Drawing.Point(0, 0)
-        $p.Size = New-Object System.Drawing.Size(1040, 360)
+        $p.Size = New-Object System.Drawing.Size(1060, 360)
         $p.BackColor = $t.Bg
         $p.Visible = $false
         $p.Anchor = "Top,Bottom,Left,Right"
@@ -379,40 +566,48 @@ function Show-MaintenanceGui {
 
     # ---- HOME ----
     $pageHome = New-Content "Home"
-    $cardSummary = New-CardPanel (New-Object System.Drawing.Point(24, 16)) (New-Object System.Drawing.Size(560, 320)) "System summary"
-    $cardSummary.Anchor = "Top,Bottom,Left"
-    $pageHome.Controls.Add($cardSummary)
 
-    $homeSummary = New-Object System.Windows.Forms.TextBox
-    $homeSummary.Multiline = $true
-    $homeSummary.ReadOnly = $true
-    $homeSummary.BorderStyle = "None"
-    $homeSummary.BackColor = $t.Panel
-    $homeSummary.ForeColor = $t.Text
-    $homeSummary.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    $homeSummary.Location = New-Object System.Drawing.Point(16, 44)
-    $homeSummary.Size = New-Object System.Drawing.Size(528, 260)
-    $homeSummary.Anchor = "Top,Bottom,Left,Right"
-    $cardSummary.Controls.Add($homeSummary)
+    $sumTitle = New-Object System.Windows.Forms.Label
+    $sumTitle.Text = "System Summary"
+    $sumTitle.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 11)
+    $sumTitle.ForeColor = $t.Text
+    $sumTitle.AutoSize = $true
+    $sumTitle.Location = New-Object System.Drawing.Point(24, 12)
+    $pageHome.Controls.Add($sumTitle)
 
-    $cardOpts = New-CardPanel (New-Object System.Drawing.Point(604, 16)) (New-Object System.Drawing.Size(410, 320)) "Maintenance options"
+    $cpuCard = New-MetricCard (New-Object System.Drawing.Point(24, 42)) (New-Object System.Drawing.Size(560, 78)) "E950" "CPU"
+    $gpuCard = New-MetricCard (New-Object System.Drawing.Point(24, 132)) (New-Object System.Drawing.Size(560, 78)) "E7F4" "GPU"
+    $ramCard = New-MetricCard (New-Object System.Drawing.Point(24, 222)) (New-Object System.Drawing.Size(560, 78)) "E950" "RAM"
+    $cpuCard.Panel.Anchor = "Top,Left"
+    $gpuCard.Panel.Anchor = "Top,Left"
+    $ramCard.Panel.Anchor = "Top,Left"
+    $pageHome.Controls.AddRange(@($cpuCard.Panel, $gpuCard.Panel, $ramCard.Panel))
+
+    $cardOpts = New-CardPanel (New-Object System.Drawing.Point(608, 16)) (New-Object System.Drawing.Size(420, 320)) "Maintenance Options"
     $cardOpts.Anchor = "Top,Right"
     $pageHome.Controls.Add($cardOpts)
 
-    $chkHomeRestore = New-PremiumCheck "Create restore point" (New-Object System.Drawing.Point(20, 52)) $true
-    $chkHomeShader = New-PremiumCheck "Clear GPU shader caches" (New-Object System.Drawing.Point(20, 88)) $true
-    $chkHomeGaming = New-PremiumCheck "Apply gaming optimizations" (New-Object System.Drawing.Point(20, 124)) $true
-    $chkHomeWU = New-PremiumCheck "Windows Update (slow)" (New-Object System.Drawing.Point(20, 160)) $false
-    $chkHomeWinget = New-PremiumCheck "winget app upgrades (slow)" (New-Object System.Drawing.Point(20, 196)) $false
+    $chkHomeRestore = New-PremiumCheck "Create restore point" (New-Object System.Drawing.Point(20, 48)) $true
+    $chkHomeShader = New-PremiumCheck "Clear GPU shader caches" (New-Object System.Drawing.Point(20, 82)) $true
+    $chkHomeGaming = New-PremiumCheck "Apply gaming optimizations" (New-Object System.Drawing.Point(20, 116)) $true
+    $chkHomeWU = New-PremiumCheck "Windows Update (slow)" (New-Object System.Drawing.Point(20, 150)) $false
+    $chkHomeWinget = New-PremiumCheck "winget app upgrades (slow)" (New-Object System.Drawing.Point(20, 184)) $false
     $cardOpts.Controls.AddRange(@($chkHomeRestore, $chkHomeShader, $chkHomeGaming, $chkHomeWU, $chkHomeWinget))
 
-    $btnWeekly = New-PremiumButton "Run Weekly Full" (New-Object System.Drawing.Point(20, 250)) (New-Object System.Drawing.Size(240, 44)) "Primary"
-    $btnRefreshHome = New-PremiumButton "Refresh" (New-Object System.Drawing.Point(276, 250)) (New-Object System.Drawing.Size(110, 44)) "Ghost"
+    $btnWeekly = New-PremiumButton "  Run Weekly Full" (New-Object System.Drawing.Point(20, 236)) (New-Object System.Drawing.Size(260, 48)) "Cta"
+    $btnRefreshHome = New-PremiumButton "Refresh" (New-Object System.Drawing.Point(292, 236)) (New-Object System.Drawing.Size(104, 48)) "Ghost"
     $cardOpts.Controls.AddRange(@($btnWeekly, $btnRefreshHome))
+
+    $nextLbl = New-Object System.Windows.Forms.Label
+    $nextLbl.Text = "Weekly kit · safe defaults (WU/winget off)"
+    $nextLbl.ForeColor = $t.Muted
+    $nextLbl.Location = New-Object System.Drawing.Point(20, 292)
+    $nextLbl.AutoSize = $true
+    $cardOpts.Controls.Add($nextLbl)
 
     # ---- CLEANUP ----
     $pageClean = New-Content "Cleanup"
-    $cardClean = New-CardPanel (New-Object System.Drawing.Point(24, 16)) (New-Object System.Drawing.Size(990, 320)) "Cleanup"
+    $cardClean = New-CardPanel (New-Object System.Drawing.Point(24, 16)) (New-Object System.Drawing.Size(1000, 320)) "Cleanup"
     $cardClean.Anchor = "Top,Bottom,Left,Right"
     $pageClean.Controls.Add($cardClean)
 
@@ -452,7 +647,7 @@ function Show-MaintenanceGui {
 
     # ---- UPDATES ----
     $pageUpd = New-Content "Updates"
-    $cardUpd = New-CardPanel (New-Object System.Drawing.Point(24, 16)) (New-Object System.Drawing.Size(990, 320)) "Updates"
+    $cardUpd = New-CardPanel (New-Object System.Drawing.Point(24, 16)) (New-Object System.Drawing.Size(1000, 320)) "Updates"
     $cardUpd.Anchor = "Top,Bottom,Left,Right"
     $pageUpd.Controls.Add($cardUpd)
 
@@ -475,40 +670,36 @@ function Show-MaintenanceGui {
 
     # ---- GAMING ----
     $pageGame = New-Content "Gaming"
-    $cardGameStatus = New-CardPanel (New-Object System.Drawing.Point(24, 16)) (New-Object System.Drawing.Size(620, 320)) "Gaming status"
+    $cardGameStatus = New-CardPanel (New-Object System.Drawing.Point(24, 16)) (New-Object System.Drawing.Size(620, 320)) "Gaming Status"
     $cardGameStatus.Anchor = "Top,Bottom,Left"
     $pageGame.Controls.Add($cardGameStatus)
 
-    $gamingStatus = New-Object System.Windows.Forms.TextBox
-    $gamingStatus.Multiline = $true
-    $gamingStatus.ReadOnly = $true
-    $gamingStatus.BorderStyle = "None"
-    $gamingStatus.BackColor = $t.Panel
-    $gamingStatus.ForeColor = $t.Text
-    $gamingStatus.Font = New-Object System.Drawing.Font("Consolas", 11)
-    $gamingStatus.Location = New-Object System.Drawing.Point(20, 52)
-    $gamingStatus.Size = New-Object System.Drawing.Size(580, 240)
-    $cardGameStatus.Controls.Add($gamingStatus)
+    $rowGm = New-GameStatusRow (New-Object System.Drawing.Point(12, 48)) 590 "E7FC" "Game Mode"
+    $rowDvr = New-GameStatusRow (New-Object System.Drawing.Point(12, 100)) 590 "E7FC" "Xbox Game DVR"
+    $rowRelive = New-GameStatusRow (New-Object System.Drawing.Point(12, 152)) 590 "E7F4" "AMD ReLive"
+    $rowPower = New-GameStatusRow (New-Object System.Drawing.Point(12, 204)) 590 "E945" "Power Plan"
+    $rowDiscord = New-GameStatusRow (New-Object System.Drawing.Point(12, 256)) 590 "E8BD" "Discord HW accel"
+    $cardGameStatus.Controls.AddRange(@($rowGm.Panel, $rowDvr.Panel, $rowRelive.Panel, $rowPower.Panel, $rowDiscord.Panel))
 
-    $cardGameActions = New-CardPanel (New-Object System.Drawing.Point(664, 16)) (New-Object System.Drawing.Size(350, 320)) "Actions"
+    $cardGameActions = New-CardPanel (New-Object System.Drawing.Point(668, 16)) (New-Object System.Drawing.Size(360, 320)) "Actions"
     $cardGameActions.Anchor = "Top,Right"
     $pageGame.Controls.Add($cardGameActions)
 
-    $btnGamingOpt = New-PremiumButton "Apply gaming optimize" (New-Object System.Drawing.Point(24, 60)) (New-Object System.Drawing.Size(300, 48)) "Primary"
-    $btnDiscordOff = New-PremiumButton "Discord HW accel OFF" (New-Object System.Drawing.Point(24, 128)) (New-Object System.Drawing.Size(300, 48)) "Ghost"
-    $btnRefreshGame = New-PremiumButton "Refresh status" (New-Object System.Drawing.Point(24, 196)) (New-Object System.Drawing.Size(300, 48)) "Ghost"
+    $btnGamingOpt = New-PremiumButton "Apply gaming optimize" (New-Object System.Drawing.Point(24, 60)) (New-Object System.Drawing.Size(310, 52)) "Primary"
+    $btnDiscordOff = New-PremiumButton "Discord HW accel OFF" (New-Object System.Drawing.Point(24, 128)) (New-Object System.Drawing.Size(310, 52)) "Ghost"
+    $btnRefreshGame = New-PremiumButton "Refresh status" (New-Object System.Drawing.Point(24, 196)) (New-Object System.Drawing.Size(310, 52)) "Ghost"
     $cardGameActions.Controls.AddRange(@($btnGamingOpt, $btnDiscordOff, $btnRefreshGame))
 
     $gameTip = New-Object System.Windows.Forms.Label
     $gameTip.Text = "Tip: Fullscreen + FPS near refresh rate usually beats uncapped FPS."
     $gameTip.ForeColor = $t.Muted
     $gameTip.Location = New-Object System.Drawing.Point(24, 270)
-    $gameTip.Size = New-Object System.Drawing.Size(300, 36)
+    $gameTip.Size = New-Object System.Drawing.Size(310, 36)
     $cardGameActions.Controls.Add($gameTip)
 
     # ---- REPAIR ----
     $pageRepair = New-Content "Repair"
-    $cardRepair = New-CardPanel (New-Object System.Drawing.Point(24, 16)) (New-Object System.Drawing.Size(990, 320)) "Repair"
+    $cardRepair = New-CardPanel (New-Object System.Drawing.Point(24, 16)) (New-Object System.Drawing.Size(1000, 320)) "Repair"
     $cardRepair.Anchor = "Top,Bottom,Left,Right"
     $pageRepair.Controls.Add($cardRepair)
 
@@ -544,30 +735,31 @@ function Show-MaintenanceGui {
     $deviceSummary.Size = New-Object System.Drawing.Size(588, 250)
     $cardDev.Controls.Add($deviceSummary)
 
-    $cardDevAct = New-CardPanel (New-Object System.Drawing.Point(664, 16)) (New-Object System.Drawing.Size(350, 320)) "Quick actions"
+    $cardDevAct = New-CardPanel (New-Object System.Drawing.Point(668, 16)) (New-Object System.Drawing.Size(360, 320)) "Quick Actions"
     $cardDevAct.Anchor = "Top,Right"
     $pageDev.Controls.Add($cardDevAct)
 
-    $btnRefreshDevice = New-PremiumButton "Refresh" (New-Object System.Drawing.Point(24, 52)) (New-Object System.Drawing.Size(300, 36)) "Ghost"
-    $btnFixPower = New-PremiumButton "Fix power plan (Ultimate)" (New-Object System.Drawing.Point(24, 98)) (New-Object System.Drawing.Size(300, 36)) "Muted"
-    $btnApplyGamingDevice = New-PremiumButton "Apply gaming optimize" (New-Object System.Drawing.Point(24, 144)) (New-Object System.Drawing.Size(300, 36)) "Primary"
-    $btnCopyRamTip = New-PremiumButton "Copy RAM upgrade tip" (New-Object System.Drawing.Point(24, 190)) (New-Object System.Drawing.Size(300, 36)) "Ghost"
-    $btnOpenStorage = New-PremiumButton "Open Storage settings" (New-Object System.Drawing.Point(24, 236)) (New-Object System.Drawing.Size(300, 36)) "Muted"
-    $btnRestartNow = New-PremiumButton "Restart PC now" (New-Object System.Drawing.Point(24, 282)) (New-Object System.Drawing.Size(300, 36)) "Danger"
+    $btnRefreshDevice = New-PremiumButton "Refresh" (New-Object System.Drawing.Point(24, 52)) (New-Object System.Drawing.Size(310, 36)) "Ghost"
+    $btnFixPower = New-PremiumButton "Fix power plan (Ultimate)" (New-Object System.Drawing.Point(24, 98)) (New-Object System.Drawing.Size(310, 36)) "Muted"
+    $btnApplyGamingDevice = New-PremiumButton "Apply gaming optimize" (New-Object System.Drawing.Point(24, 144)) (New-Object System.Drawing.Size(310, 36)) "Primary"
+    $btnCopyRamTip = New-PremiumButton "Copy RAM upgrade tip" (New-Object System.Drawing.Point(24, 190)) (New-Object System.Drawing.Size(310, 36)) "Ghost"
+    $btnOpenStorage = New-PremiumButton "Open Storage settings" (New-Object System.Drawing.Point(24, 236)) (New-Object System.Drawing.Size(310, 36)) "Muted"
+    $btnRestartNow = New-PremiumButton "Restart PC now" (New-Object System.Drawing.Point(24, 282)) (New-Object System.Drawing.Size(310, 36)) "Danger"
     $cardDevAct.Controls.AddRange(@($btnRefreshDevice, $btnFixPower, $btnApplyGamingDevice, $btnCopyRamTip, $btnOpenStorage, $btnRestartNow))
 
     # ---- LOG FOOTER ----
     $logCard = New-Object System.Windows.Forms.Panel
-    $logCard.Location = New-Object System.Drawing.Point(24, 480)
-    $logCard.Size = New-Object System.Drawing.Size(990, 168)
+    $logCard.Location = New-Object System.Drawing.Point(24, 490)
+    $logCard.Size = New-Object System.Drawing.Size(1000, 180)
     $logCard.BackColor = $t.Panel
     $logCard.Anchor = "Bottom,Left,Right"
+    Add-PanelBorder $logCard $t.Accent
     $form.Controls.Add($logCard)
 
     $logTitle = New-Object System.Windows.Forms.Label
     $logTitle.Text = "Maintenance Log"
     $logTitle.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
-    $logTitle.ForeColor = $t.Text
+    $logTitle.ForeColor = $t.Accent
     $logTitle.AutoSize = $true
     $logTitle.Location = New-Object System.Drawing.Point(16, 10)
     $logCard.Controls.Add($logTitle)
@@ -583,7 +775,7 @@ function Show-MaintenanceGui {
 
     $log = New-Object System.Windows.Forms.RichTextBox
     $log.Location = New-Object System.Drawing.Point(16, 36)
-    $log.Size = New-Object System.Drawing.Size(958, 88)
+    $log.Size = New-Object System.Drawing.Size(968, 80)
     $log.BackColor = $t.LogBg
     $log.ForeColor = $t.Accent
     $log.Font = New-Object System.Drawing.Font("Consolas", 9)
@@ -592,32 +784,53 @@ function Show-MaintenanceGui {
     $log.Anchor = "Top,Bottom,Left,Right"
     $logCard.Controls.Add($log)
 
+    $progressTrack = New-Object System.Windows.Forms.Panel
+    $progressTrack.Location = New-Object System.Drawing.Point(16, 128)
+    $progressTrack.Size = New-Object System.Drawing.Size(700, 12)
+    $progressTrack.BackColor = $t.IconBox
+    $progressTrack.Anchor = "Bottom,Left,Right"
+    $logCard.Controls.Add($progressTrack)
+
+    $progressFill = New-Object System.Windows.Forms.Panel
+    $progressFill.Location = New-Object System.Drawing.Point(0, 0)
+    $progressFill.Size = New-Object System.Drawing.Size(0, 12)
+    $progressFill.BackColor = $t.Accent
+    $progressTrack.Controls.Add($progressFill)
+
     $progress = New-Object System.Windows.Forms.ProgressBar
-    $progress.Location = New-Object System.Drawing.Point(16, 132)
-    $progress.Size = New-Object System.Drawing.Size(700, 10)
-    $progress.Style = "Continuous"
-    $progress.Anchor = "Bottom,Left,Right"
+    $progress.Visible = $false
+    $progress.Minimum = 0
+    $progress.Maximum = 100
+    $progress.Value = 0
     $logCard.Controls.Add($progress)
 
+    $progLbl = New-Object System.Windows.Forms.Label
+    $progLbl.Text = "Overall Progress"
+    $progLbl.ForeColor = $t.Muted
+    $progLbl.Location = New-Object System.Drawing.Point(16, 146)
+    $progLbl.AutoSize = $true
+    $progLbl.Anchor = "Bottom,Left"
+    $logCard.Controls.Add($progLbl)
+
     $status = New-Object System.Windows.Forms.Label
-    $status.Text = "Overall Progress"
+    $status.Text = "Ready"
     $status.ForeColor = $t.Muted
-    $status.Location = New-Object System.Drawing.Point(16, 146)
-    $status.AutoSize = $true
+    $status.Location = New-Object System.Drawing.Point(150, 146)
+    $status.Size = New-Object System.Drawing.Size(400, 18)
     $status.Anchor = "Bottom,Left"
     $logCard.Controls.Add($status)
 
     $statusBar = New-Object System.Windows.Forms.Label
     $statusBar.Text = "Ready"
     $statusBar.ForeColor = $t.Muted
-    $statusBar.Location = New-Object System.Drawing.Point(200, 146)
-    $statusBar.Size = New-Object System.Drawing.Size(520, 18)
+    $statusBar.Location = New-Object System.Drawing.Point(560, 146)
+    $statusBar.Size = New-Object System.Drawing.Size(160, 18)
     $statusBar.Anchor = "Bottom,Left,Right"
     $logCard.Controls.Add($statusBar)
 
-    $btnLogs = New-PremiumButton "Open logs" (New-Object System.Drawing.Point(740, 132)) (New-Object System.Drawing.Size(110, 32)) "Muted"
-    $btnCli = New-PremiumButton "CLI" (New-Object System.Drawing.Point(860, 132)) (New-Object System.Drawing.Size(54, 32)) "Muted"
-    $btnQuit = New-PremiumButton "Quit" (New-Object System.Drawing.Point(924, 132)) (New-Object System.Drawing.Size(50, 32)) "Danger"
+    $btnLogs = New-PremiumButton "View Full Log" (New-Object System.Drawing.Point(740, 128)) (New-Object System.Drawing.Size(120, 32)) "Muted"
+    $btnCli = New-PremiumButton "CLI" (New-Object System.Drawing.Point(870, 128)) (New-Object System.Drawing.Size(54, 32)) "Muted"
+    $btnQuit = New-PremiumButton "Quit" (New-Object System.Drawing.Point(934, 128)) (New-Object System.Drawing.Size(50, 32)) "Danger"
     $btnLogs.Anchor = "Bottom,Right"
     $btnCli.Anchor = "Bottom,Right"
     $btnQuit.Anchor = "Bottom,Right"
@@ -628,9 +841,18 @@ function Show-MaintenanceGui {
         Free            = $freeLbl
         RebootBadge     = $rebootBadge
         StatusBar       = $statusBar
-        HomeSummary     = $homeSummary
+        CpuMain         = $cpuCard.Main
+        CpuStat         = $cpuCard.Stat
+        GpuMain         = $gpuCard.Main
+        GpuStat          = $gpuCard.Stat
+        RamMain         = $ramCard.Main
+        RamStat         = $ramCard.Stat
         DeviceSummary   = $deviceSummary
-        GamingStatus    = $gamingStatus
+        GameModeVal     = $rowGm.Value
+        GameDvrVal      = $rowDvr.Value
+        ReLiveVal       = $rowRelive.Value
+        PowerVal        = $rowPower.Value
+        DiscordVal      = $rowDiscord.Value
         ChkHomeRestore  = $chkHomeRestore
         ChkHomeShader   = $chkHomeShader
         ChkHomeGaming   = $chkHomeGaming
@@ -665,11 +887,13 @@ function Show-MaintenanceGui {
     }
 
     $Script:Ui = [pscustomobject]@{
-        Form     = $form
-        Progress = $progress
-        Status   = $status
-        Log      = $log
-        Free     = $freeLbl
+        Form          = $form
+        Progress      = $progress
+        ProgressFill  = $progressFill
+        ProgressTrack = $progressTrack
+        Status        = $status
+        Log           = $log
+        Free          = $freeLbl
     }
 
     Set-ActiveNav "Home"

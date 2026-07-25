@@ -40,9 +40,17 @@ function Get-UiControl([string]$Name) {
 }
 
 function Set-UiProgressValue([int]$Value) {
+    $pct = [math]::Max(0, [math]::Min(100, $Value))
     $bar = Get-UiControl Progress
-    if (-not $bar) { return }
-    $bar.Value = [math]::Max(0, [math]::Min(100, $Value))
+    if ($bar) {
+        try { $bar.Value = $pct } catch { }
+    }
+    $fill = Get-UiControl ProgressFill
+    $track = Get-UiControl ProgressTrack
+    if ($fill -and $track) {
+        $w = [math]::Max(0, [int](($track.ClientSize.Width * $pct) / 100.0))
+        $fill.Width = $w
+    }
 }
 
 function Set-UiStatusText([string]$Text) {
