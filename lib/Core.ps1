@@ -19,6 +19,7 @@ $Script:TempOlderThanDays = 2
 $Script:Ui = $null
 $Script:CancelRequested = $false
 $Script:LastPumpUtc = [datetime]::MinValue
+$Script:LastProgressPct = 0
 
 function Pump-Ui {
     $form = Get-UiControl Form
@@ -41,6 +42,7 @@ function Get-UiControl([string]$Name) {
 
 function Set-UiProgressValue([int]$Value) {
     $pct = [math]::Max(0, [math]::Min(100, $Value))
+    $Script:LastProgressPct = $pct
     $bar = Get-UiControl Progress
     if ($bar) {
         try { $bar.Value = $pct } catch { }

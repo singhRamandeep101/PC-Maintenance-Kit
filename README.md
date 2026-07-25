@@ -29,9 +29,9 @@ Built for weekly cleanup, gaming optimizations, controlled updates, and optional
 | **Home** | Device snapshot + Weekly Full (cleanup + gaming opts; WU/winget off by default) |
 | **Cleanup** | Temp, browsers, Recycle Bin, GPU shader caches; optional Steam/Epic/Riot caches (confirm) |
 | **Updates** | Windows Update and/or winget; open AMD Adrenalin / NVIDIA App |
-| **Gaming** | Game Mode on, Game DVR/ReLive off, Ultimate Performance, Discord HW accel off |
+| **Gaming** | Status + apply optimize, fix power plan, Discord HW accel off |
 | **Repair** | Restore point + DISM/SFC (slow; confirm required) |
-| **Device** | Specs + actions: fix power plan, gaming optimize, copy RAM tip, storage settings, restart |
+| **Device** | Specs + actions: copy RAM tip, storage settings, restart |
 
 ## Safety
 

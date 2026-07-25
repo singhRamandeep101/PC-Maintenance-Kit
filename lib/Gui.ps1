@@ -1,5 +1,6 @@
 $Script:GuiBusy = $false
 $Script:LastJobText = "Ready"
+$Script:LastProgressPct = 0
 $Script:Theme = $null
 $Script:ContentPanels = @{}
 $Script:NavButtons = @{}
@@ -27,8 +28,16 @@ function Get-GuiTheme {
     }
 }
 
+function Get-Mdl2Char([string]$Hex) {
+    $clean = ($Hex -replace '^0x', '').Trim()
+    return [char][Convert]::ToInt32($clean, 16)
+}
+
 function Add-PanelBorder {
     param($Panel, $Color = $null, [int]$Width = 1)
+    if ($Color) {
+        $Panel.Tag = $Color
+    }
     $Panel.Add_Paint({
         param($sender, $e)
         $c = if ($sender.Tag -is [System.Drawing.Color]) { $sender.Tag } else { $Script:Theme.Border }
@@ -37,7 +46,6 @@ function Add-PanelBorder {
         $e.Graphics.DrawRectangle($pen, $rect)
         $pen.Dispose()
     })
-    if ($Color) { $Panel.Tag = $Color }
 }
 
 function Update-GuiStatusBar {
@@ -130,15 +138,15 @@ function New-PremiumCheck {
 
 function New-CardPanel {
     param(
-        [System.Drawing.Point]$Location,
-        [System.Drawing.Size]$Size,
-        [string]$Title = ""
+        [string]$Title = "",
+        [System.Windows.Forms.DockStyle]$Dock = [System.Windows.Forms.DockStyle]::None
     )
     $t = $Script:Theme
     $p = New-Object System.Windows.Forms.Panel
-    $p.Location = $Location
-    $p.Size = $Size
     $p.BackColor = $t.Panel
+    if ($Dock -ne [System.Windows.Forms.DockStyle]::None) {
+        $p.Dock = $Dock
+    }
     Add-PanelBorder $p $t.Border
     if ($Title) {
         $lbl = New-Object System.Windows.Forms.Label
@@ -154,27 +162,31 @@ function New-CardPanel {
 
 function New-MetricCard {
     param(
-        [System.Drawing.Point]$Location,
-        [System.Drawing.Size]$Size,
         [string]$Glyph,
         [string]$Title
     )
     $t = $Script:Theme
     $card = New-Object System.Windows.Forms.Panel
-    $card.Location = $Location
-    $card.Size = $Size
-    $card.BackColor = $t.Panel
-    Add-PanelBorder $card $t.Border
+    $card.Height = 78
+    $card.Dock = "Top"
+    $card.Padding = New-Object System.Windows.Forms.Padding(0, 0, 0, 10)
+    $card.BackColor = $t.Bg
+
+    $inner = New-Object System.Windows.Forms.Panel
+    $inner.Dock = "Fill"
+    $inner.BackColor = $t.Panel
+    Add-PanelBorder $inner $t.Border
+    $card.Controls.Add($inner)
 
     $iconBox = New-Object System.Windows.Forms.Panel
-    $iconBox.Location = New-Object System.Drawing.Point(14, 16)
+    $iconBox.Location = New-Object System.Drawing.Point(14, 12)
     $iconBox.Size = New-Object System.Drawing.Size(44, 44)
     $iconBox.BackColor = $t.IconBox
     Add-PanelBorder $iconBox $t.Border
-    $card.Controls.Add($iconBox)
+    $inner.Controls.Add($iconBox)
 
     $icon = New-Object System.Windows.Forms.Label
-    $icon.Text = [char][int]"0x$Glyph"
+    $icon.Text = (Get-Mdl2Char $Glyph)
     $icon.Font = New-Object System.Drawing.Font("Segoe MDL2 Assets", 14)
     $icon.ForeColor = $t.Accent
     $icon.AutoSize = $true
@@ -186,25 +198,41 @@ function New-MetricCard {
     $titleLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 8.5)
     $titleLbl.ForeColor = $t.Muted
     $titleLbl.AutoSize = $true
-    $titleLbl.Location = New-Object System.Drawing.Point(72, 12)
-    $card.Controls.Add($titleLbl)
+    $titleLbl.Location = New-Object System.Drawing.Point(72, 10)
+    $inner.Controls.Add($titleLbl)
 
     $mainLbl = New-Object System.Windows.Forms.Label
     $mainLbl.Text = "-"
     $mainLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
     $mainLbl.ForeColor = $t.Text
-    $mainLbl.Location = New-Object System.Drawing.Point(72, 32)
-    $mainLbl.Size = New-Object System.Drawing.Size(300, 40)
-    $card.Controls.Add($mainLbl)
+    $mainLbl.Location = New-Object System.Drawing.Point(72, 28)
+    $mainLbl.Size = New-Object System.Drawing.Size(280, 36)
+    $mainLbl.Anchor = "Top,Left,Right"
+    $inner.Controls.Add($mainLbl)
 
     $statLbl = New-Object System.Windows.Forms.Label
     $statLbl.Text = ""
     $statLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5)
     $statLbl.ForeColor = $t.Accent
     $statLbl.TextAlign = "MiddleRight"
-    $statLbl.Location = New-Object System.Drawing.Point(($Size.Width - 170), 22)
-    $statLbl.Size = New-Object System.Drawing.Size(150, 36)
-    $card.Controls.Add($statLbl)
+    $statLbl.Location = New-Object System.Drawing.Point(360, 18)
+    $statLbl.Size = New-Object System.Drawing.Size(160, 36)
+    $statLbl.Anchor = "Top,Right"
+    $inner.Controls.Add($statLbl)
+
+    $inner.Add_Resize({
+        param($sender, $e)
+        foreach ($ctrl in $sender.Controls) {
+            if ($ctrl -is [System.Windows.Forms.Label] -and $ctrl.Anchor -band [System.Windows.Forms.AnchorStyles]::Right -and $ctrl.Anchor -band [System.Windows.Forms.AnchorStyles]::Left) {
+                # main label handled by Anchor
+            }
+        }
+        $right = $sender.Controls | Where-Object { $_.Anchor -eq ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right) } | Select-Object -First 1
+        $mid = $sender.Controls | Where-Object { $_.Font -and $_.Font.Size -eq 10 -and $_.Location.X -eq 72 } | Select-Object -First 1
+        if ($right -and $mid) {
+            $mid.Width = [math]::Max(120, $right.Left - $mid.Left - 12)
+        }
+    })
 
     return [pscustomobject]@{
         Panel = $card
@@ -215,15 +243,13 @@ function New-MetricCard {
 
 function New-GameStatusRow {
     param(
-        [System.Drawing.Point]$Location,
-        [int]$Width,
         [string]$Glyph,
         [string]$Title
     )
     $t = $Script:Theme
     $row = New-Object System.Windows.Forms.Panel
-    $row.Location = $Location
-    $row.Size = New-Object System.Drawing.Size($Width, 52)
+    $row.Height = 52
+    $row.Dock = "Top"
     $row.BackColor = $t.Panel
 
     $iconBox = New-Object System.Windows.Forms.Panel
@@ -234,7 +260,7 @@ function New-GameStatusRow {
     $row.Controls.Add($iconBox)
 
     $icon = New-Object System.Windows.Forms.Label
-    $icon.Text = [char][int]"0x$Glyph"
+    $icon.Text = (Get-Mdl2Char $Glyph)
     $icon.Font = New-Object System.Drawing.Font("Segoe MDL2 Assets", 11)
     $icon.ForeColor = $t.Accent
     $icon.AutoSize = $true
@@ -254,8 +280,9 @@ function New-GameStatusRow {
     $valLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
     $valLbl.ForeColor = $t.Muted
     $valLbl.TextAlign = "MiddleRight"
-    $valLbl.Location = New-Object System.Drawing.Point(($Width - 220), 14)
+    $valLbl.Location = New-Object System.Drawing.Point(300, 14)
     $valLbl.Size = New-Object System.Drawing.Size(200, 24)
+    $valLbl.Anchor = "Top,Right"
     $row.Controls.Add($valLbl)
 
     $row.Add_Paint({
@@ -292,7 +319,7 @@ function Set-GuiBusy([bool]$Busy) {
     $Script:GuiBusy = $Busy
     $runBtns = @(
         'BtnWeekly','BtnCleanup','BtnUpdates','BtnRepair','BtnGamingOpt','BtnRefreshDevice',
-        'BtnFixPower','BtnApplyGamingDevice','BtnCopyRamTip','BtnRestartNow','BtnOpenStorage',
+        'BtnFixPower','BtnCopyRamTip','BtnRestartNow','BtnOpenStorage',
         'BtnDiscordOff','BtnRefreshGame','BtnRefreshHome','BtnAmd','BtnNv','BtnRestoreOnly'
     )
     foreach ($n in $runBtns) {
@@ -423,6 +450,7 @@ function Show-MaintenanceGui {
     $Script:ContentPanels = @{}
     $Script:NavButtons = @{}
     $Script:NavIcons = @{}
+    $Script:LastProgressPct = 0
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "PC Maintenance Kit v5.1"
@@ -433,15 +461,15 @@ function Show-MaintenanceGui {
     $form.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
     $form.MinimumSize = New-Object System.Drawing.Size(980, 720)
 
+    # ---- HEADER (Dock Top) ----
     $header = New-Object System.Windows.Forms.Panel
-    $header.Location = New-Object System.Drawing.Point(0, 0)
-    $header.Size = New-Object System.Drawing.Size(1060, 118)
+    $header.Dock = "Top"
+    $header.Height = 118
     $header.BackColor = $t.Header
-    $header.Anchor = "Top,Left,Right"
     $form.Controls.Add($header)
 
     $brandIcon = New-Object System.Windows.Forms.Label
-    $brandIcon.Text = [char]0xE90F
+    $brandIcon.Text = (Get-Mdl2Char 'E7FC')
     $brandIcon.Font = New-Object System.Drawing.Font("Segoe MDL2 Assets", 16)
     $brandIcon.ForeColor = $t.Accent
     $brandIcon.AutoSize = $true
@@ -468,16 +496,22 @@ function Show-MaintenanceGui {
     $freeLbl.ForeColor = $t.Accent
     $freeLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5)
     $freeLbl.AutoSize = $true
-    $freeLbl.Location = New-Object System.Drawing.Point(800, 16)
     $freeLbl.Anchor = "Top,Right"
+    $freeLbl.Location = New-Object System.Drawing.Point(($header.Width - 220), 16)
     $header.Controls.Add($freeLbl)
 
     $rebootBadge = New-Object System.Windows.Forms.Label
     $rebootBadge.Text = "..."
     $rebootBadge.AutoSize = $true
-    $rebootBadge.Location = New-Object System.Drawing.Point(800, 40)
     $rebootBadge.Anchor = "Top,Right"
+    $rebootBadge.Location = New-Object System.Drawing.Point(($header.Width - 220), 40)
     $header.Controls.Add($rebootBadge)
+
+    $header.Add_Resize({
+        param($sender, $e)
+        $freeLbl.Left = [math]::Max(700, $sender.ClientSize.Width - 220)
+        $rebootBadge.Left = [math]::Max(700, $sender.ClientSize.Width - 220)
+    })
 
     $navDefs = @(
         @{ Name = 'Home'; Glyph = 'E80F' }
@@ -485,7 +519,7 @@ function Show-MaintenanceGui {
         @{ Name = 'Updates'; Glyph = 'E895' }
         @{ Name = 'Gaming'; Glyph = 'E7FC' }
         @{ Name = 'Repair'; Glyph = 'E90F' }
-        @{ Name = 'Device'; Glyph = 'E770' }
+        @{ Name = 'Device'; Glyph = 'E975' }
     )
     $navX = 24
     foreach ($def in $navDefs) {
@@ -499,7 +533,7 @@ function Show-MaintenanceGui {
         $header.Controls.Add($wrap)
 
         $ico = New-Object System.Windows.Forms.Label
-        $ico.Text = [char][int]("0x$($def.Glyph)")
+        $ico.Text = (Get-Mdl2Char $def.Glyph)
         $ico.Font = New-Object System.Drawing.Font("Segoe MDL2 Assets", 11)
         $ico.ForeColor = $t.Muted
         $ico.AutoSize = $true
@@ -547,20 +581,169 @@ function Show-MaintenanceGui {
         $navX += 112
     }
 
+    # ---- FOOTER HOST (Dock Bottom) ----
+    $footerHost = New-Object System.Windows.Forms.Panel
+    $footerHost.Dock = "Bottom"
+    $footerHost.Height = 200
+    $footerHost.BackColor = $t.Bg
+    $footerHost.Padding = New-Object System.Windows.Forms.Padding(24, 8, 24, 16)
+    $form.Controls.Add($footerHost)
+
+    $logCard = New-Object System.Windows.Forms.Panel
+    $logCard.Dock = "Fill"
+    $logCard.BackColor = $t.Panel
+    Add-PanelBorder $logCard $t.Accent
+    $footerHost.Controls.Add($logCard)
+
+    $logTop = New-Object System.Windows.Forms.Panel
+    $logTop.Dock = "Top"
+    $logTop.Height = 34
+    $logTop.BackColor = $t.Panel
+    $logCard.Controls.Add($logTop)
+
+    $logTitle = New-Object System.Windows.Forms.Label
+    $logTitle.Text = "Maintenance Log"
+    $logTitle.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
+    $logTitle.ForeColor = $t.Accent
+    $logTitle.AutoSize = $true
+    $logTitle.Location = New-Object System.Drawing.Point(16, 10)
+    $logTop.Controls.Add($logTitle)
+
+    $btnClearLog = New-Object System.Windows.Forms.LinkLabel
+    $btnClearLog.Text = "Clear log"
+    $btnClearLog.LinkColor = $t.Accent
+    $btnClearLog.ActiveLinkColor = $t.Text
+    $btnClearLog.AutoSize = $true
+    $btnClearLog.Anchor = "Top,Right"
+    $btnClearLog.Location = New-Object System.Drawing.Point(($logTop.Width - 90), 12)
+    $logTop.Controls.Add($btnClearLog)
+    $logTop.Add_Resize({
+        param($sender, $e)
+        $btnClearLog.Left = $sender.ClientSize.Width - 90
+    })
+
+    $logBottom = New-Object System.Windows.Forms.Panel
+    $logBottom.Dock = "Bottom"
+    $logBottom.Height = 56
+    $logBottom.BackColor = $t.Panel
+    $logCard.Controls.Add($logBottom)
+
+    $btnCluster = New-Object System.Windows.Forms.Panel
+    $btnCluster.Dock = "Right"
+    $btnCluster.Width = 240
+    $btnCluster.BackColor = $t.Panel
+    $logBottom.Controls.Add($btnCluster)
+
+    $btnLogs = New-PremiumButton "View Full Log" (New-Object System.Drawing.Point(8, 12)) (New-Object System.Drawing.Size(120, 32)) "Muted"
+    $btnCli = New-PremiumButton "CLI" (New-Object System.Drawing.Point(136, 12)) (New-Object System.Drawing.Size(44, 32)) "Muted"
+    $btnQuit = New-PremiumButton "Quit" (New-Object System.Drawing.Point(186, 12)) (New-Object System.Drawing.Size(46, 32)) "Danger"
+    $btnCluster.Controls.AddRange(@($btnLogs, $btnCli, $btnQuit))
+
+    $progArea = New-Object System.Windows.Forms.Panel
+    $progArea.Dock = "Fill"
+    $progArea.BackColor = $t.Panel
+    $progArea.Padding = New-Object System.Windows.Forms.Padding(16, 10, 12, 8)
+    $logBottom.Controls.Add($progArea)
+
+    $progressTrack = New-Object System.Windows.Forms.Panel
+    $progressTrack.Dock = "Top"
+    $progressTrack.Height = 12
+    $progressTrack.BackColor = $t.IconBox
+    $progArea.Controls.Add($progressTrack)
+
+    $progressFill = New-Object System.Windows.Forms.Panel
+    $progressFill.Location = New-Object System.Drawing.Point(0, 0)
+    $progressFill.Size = New-Object System.Drawing.Size(0, 12)
+    $progressFill.BackColor = $t.Accent
+    $progressTrack.Controls.Add($progressFill)
+
+    $progress = New-Object System.Windows.Forms.ProgressBar
+    $progress.Visible = $false
+    $progress.Minimum = 0
+    $progress.Maximum = 100
+    $progress.Value = 0
+
+    $statusRow = New-Object System.Windows.Forms.Panel
+    $statusRow.Dock = "Fill"
+    $statusRow.BackColor = $t.Panel
+    $progArea.Controls.Add($statusRow)
+
+    # Add progressTrack first then status - Dock order: add Fill first then Top so Top wins? 
+    # Actually in WinForms, last docked control gets priority for remaining space differently.
+    # Correct order: add Fill (statusRow) first, then Top (track) - track takes top, status fills rest.
+    $progArea.Controls.Clear()
+    $progArea.Controls.Add($statusRow)
+    $progArea.Controls.Add($progressTrack)
+
+    $progLbl = New-Object System.Windows.Forms.Label
+    $progLbl.Text = "Overall Progress"
+    $progLbl.ForeColor = $t.Muted
+    $progLbl.AutoSize = $true
+    $progLbl.Location = New-Object System.Drawing.Point(0, 4)
+    $statusRow.Controls.Add($progLbl)
+
+    $status = New-Object System.Windows.Forms.Label
+    $status.Text = "Ready"
+    $status.ForeColor = $t.Muted
+    $status.Location = New-Object System.Drawing.Point(130, 4)
+    $status.Size = New-Object System.Drawing.Size(280, 18)
+    $status.Anchor = "Top,Left,Right"
+    $statusRow.Controls.Add($status)
+
+    $statusBar = New-Object System.Windows.Forms.Label
+    $statusBar.Text = "Ready"
+    $statusBar.ForeColor = $t.Muted
+    $statusBar.Location = New-Object System.Drawing.Point(420, 4)
+    $statusBar.Size = New-Object System.Drawing.Size(200, 18)
+    $statusBar.Anchor = "Top,Right"
+    $statusRow.Controls.Add($statusBar)
+
+    $log = New-Object System.Windows.Forms.RichTextBox
+    $log.Dock = "Fill"
+    $log.BackColor = $t.LogBg
+    $log.ForeColor = $t.Accent
+    $log.Font = New-Object System.Drawing.Font("Consolas", 9)
+    $log.ReadOnly = $true
+    $log.BorderStyle = "None"
+    $log.Margin = New-Object System.Windows.Forms.Padding(16)
+    # Padding via wrapper
+    $logWrap = New-Object System.Windows.Forms.Panel
+    $logWrap.Dock = "Fill"
+    $logWrap.BackColor = $t.LogBg
+    $logWrap.Padding = New-Object System.Windows.Forms.Padding(16, 4, 16, 4)
+    $logCard.Controls.Add($logWrap)
+    $log.Dock = "Fill"
+    $logWrap.Controls.Add($log)
+
+    # Dock order for logCard: add Fill (logWrap) first, then Bottom, then Top
+    $logCard.Controls.Clear()
+    $logCard.Controls.Add($logWrap)
+    $logCard.Controls.Add($logBottom)
+    $logCard.Controls.Add($logTop)
+    $logWrap.Controls.Add($log)
+
+    $progressTrack.Add_Resize({
+        Set-UiProgressValue $Script:LastProgressPct
+    })
+
+    # ---- CONTENT HOST (Dock Fill) ----
     $hostPanel = New-Object System.Windows.Forms.Panel
-    $hostPanel.Location = New-Object System.Drawing.Point(0, 118)
-    $hostPanel.Size = New-Object System.Drawing.Size(1060, 360)
+    $hostPanel.Dock = "Fill"
     $hostPanel.BackColor = $t.Bg
-    $hostPanel.Anchor = "Top,Bottom,Left,Right"
+    $hostPanel.Padding = New-Object System.Windows.Forms.Padding(24, 12, 24, 8)
     $form.Controls.Add($hostPanel)
+
+    # Dock order: add Fill first, then Bottom, then Top
+    $form.Controls.Clear()
+    $form.Controls.Add($hostPanel)
+    $form.Controls.Add($footerHost)
+    $form.Controls.Add($header)
 
     function New-Content([string]$Name) {
         $p = New-Object System.Windows.Forms.Panel
-        $p.Location = New-Object System.Drawing.Point(0, 0)
-        $p.Size = New-Object System.Drawing.Size(1060, 360)
+        $p.Dock = "Fill"
         $p.BackColor = $t.Bg
         $p.Visible = $false
-        $p.Anchor = "Top,Bottom,Left,Right"
         $hostPanel.Controls.Add($p)
         $Script:ContentPanels[$Name] = $p
         return $p
@@ -568,26 +751,50 @@ function Show-MaintenanceGui {
 
     # ---- HOME ----
     $pageHome = New-Content "Home"
+    $homeSplit = New-Object System.Windows.Forms.TableLayoutPanel
+    $homeSplit.Dock = "Fill"
+    $homeSplit.ColumnCount = 2
+    $homeSplit.RowCount = 1
+    [void]$homeSplit.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 58)))
+    [void]$homeSplit.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 42)))
+    $homeSplit.Padding = New-Object System.Windows.Forms.Padding(0)
+    $pageHome.Controls.Add($homeSplit)
+
+    $homeLeft = New-Object System.Windows.Forms.Panel
+    $homeLeft.Dock = "Fill"
+    $homeLeft.BackColor = $t.Bg
+    $homeLeft.Padding = New-Object System.Windows.Forms.Padding(0, 0, 12, 0)
+    $homeSplit.Controls.Add($homeLeft, 0, 0)
+
+    $metricsHost = New-Object System.Windows.Forms.Panel
+    $metricsHost.Dock = "Fill"
+    $metricsHost.BackColor = $t.Bg
+    $homeLeft.Controls.Add($metricsHost)
 
     $sumTitle = New-Object System.Windows.Forms.Label
     $sumTitle.Text = "System Summary"
     $sumTitle.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 11)
     $sumTitle.ForeColor = $t.Text
-    $sumTitle.AutoSize = $true
-    $sumTitle.Location = New-Object System.Drawing.Point(24, 12)
-    $pageHome.Controls.Add($sumTitle)
+    $sumTitle.Dock = "Top"
+    $sumTitle.Height = 28
+    $homeLeft.Controls.Add($sumTitle)
 
-    $cpuCard = New-MetricCard (New-Object System.Drawing.Point(24, 42)) (New-Object System.Drawing.Size(560, 78)) "E950" "CPU"
-    $gpuCard = New-MetricCard (New-Object System.Drawing.Point(24, 132)) (New-Object System.Drawing.Size(560, 78)) "E7F4" "GPU"
-    $ramCard = New-MetricCard (New-Object System.Drawing.Point(24, 222)) (New-Object System.Drawing.Size(560, 78)) "E950" "RAM"
-    $cpuCard.Panel.Anchor = "Top,Left"
-    $gpuCard.Panel.Anchor = "Top,Left"
-    $ramCard.Panel.Anchor = "Top,Left"
-    $pageHome.Controls.AddRange(@($cpuCard.Panel, $gpuCard.Panel, $ramCard.Panel))
+    # Dock Top metrics: add in reverse visual order (bottom first)
+    $ramCard = New-MetricCard "EDA2" "RAM"
+    $gpuCard = New-MetricCard "E7F4" "GPU"
+    $cpuCard = New-MetricCard "E950" "CPU"
+    $metricsHost.Controls.Add($ramCard.Panel)
+    $metricsHost.Controls.Add($gpuCard.Panel)
+    $metricsHost.Controls.Add($cpuCard.Panel)
 
-    $cardOpts = New-CardPanel (New-Object System.Drawing.Point(608, 16)) (New-Object System.Drawing.Size(420, 320)) "Maintenance Options"
-    $cardOpts.Anchor = "Top,Right"
-    $pageHome.Controls.Add($cardOpts)
+    $homeRight = New-Object System.Windows.Forms.Panel
+    $homeRight.Dock = "Fill"
+    $homeRight.BackColor = $t.Bg
+    $homeRight.Padding = New-Object System.Windows.Forms.Padding(12, 0, 0, 0)
+    $homeSplit.Controls.Add($homeRight, 1, 0)
+
+    $cardOpts = New-CardPanel "Maintenance Options" "Fill"
+    $homeRight.Controls.Add($cardOpts)
 
     $chkHomeRestore = New-PremiumCheck "Create restore point" (New-Object System.Drawing.Point(20, 48)) $true
     $chkHomeShader = New-PremiumCheck "Clear GPU shader caches" (New-Object System.Drawing.Point(20, 82)) $true
@@ -596,8 +803,10 @@ function Show-MaintenanceGui {
     $chkHomeWinget = New-PremiumCheck "winget app upgrades (slow)" (New-Object System.Drawing.Point(20, 184)) $false
     $cardOpts.Controls.AddRange(@($chkHomeRestore, $chkHomeShader, $chkHomeGaming, $chkHomeWU, $chkHomeWinget))
 
-    $btnWeekly = New-PremiumButton "  Run Weekly Full" (New-Object System.Drawing.Point(20, 236)) (New-Object System.Drawing.Size(260, 48)) "Cta"
-    $btnRefreshHome = New-PremiumButton "Refresh" (New-Object System.Drawing.Point(292, 236)) (New-Object System.Drawing.Size(104, 48)) "Ghost"
+    $btnWeekly = New-PremiumButton "  Run Weekly Full" (New-Object System.Drawing.Point(20, 236)) (New-Object System.Drawing.Size(240, 48)) "Cta"
+    $btnRefreshHome = New-PremiumButton "Refresh" (New-Object System.Drawing.Point(272, 236)) (New-Object System.Drawing.Size(100, 48)) "Ghost"
+    $btnWeekly.Anchor = "Bottom,Left"
+    $btnRefreshHome.Anchor = "Bottom,Left"
     $cardOpts.Controls.AddRange(@($btnWeekly, $btnRefreshHome))
 
     $nextLbl = New-Object System.Windows.Forms.Label
@@ -605,19 +814,27 @@ function Show-MaintenanceGui {
     $nextLbl.ForeColor = $t.Muted
     $nextLbl.Location = New-Object System.Drawing.Point(20, 292)
     $nextLbl.AutoSize = $true
+    $nextLbl.Anchor = "Bottom,Left"
     $cardOpts.Controls.Add($nextLbl)
+
+    $cardOpts.Add_Resize({
+        param($sender, $e)
+        $btnWeekly.Top = $sender.ClientSize.Height - 84
+        $btnRefreshHome.Top = $sender.ClientSize.Height - 84
+        $nextLbl.Top = $sender.ClientSize.Height - 28
+    })
 
     # ---- CLEANUP ----
     $pageClean = New-Content "Cleanup"
-    $cardClean = New-CardPanel (New-Object System.Drawing.Point(24, 16)) (New-Object System.Drawing.Size(1000, 320)) "Cleanup"
-    $cardClean.Anchor = "Top,Bottom,Left,Right"
+    $cardClean = New-CardPanel "Cleanup" "Fill"
     $pageClean.Controls.Add($cardClean)
 
     $cleanHint = New-Object System.Windows.Forms.Label
     $cleanHint.Text = "Safe free-space cleanup. Launcher caches need confirmation and never uninstall games."
     $cleanHint.ForeColor = $t.Muted
     $cleanHint.Location = New-Object System.Drawing.Point(20, 48)
-    $cleanHint.Size = New-Object System.Drawing.Size(940, 28)
+    $cleanHint.Size = New-Object System.Drawing.Size(900, 28)
+    $cleanHint.Anchor = "Top,Left,Right"
     $cardClean.Controls.Add($cleanHint)
 
     $daysLbl = New-Object System.Windows.Forms.Label
@@ -644,20 +861,27 @@ function Show-MaintenanceGui {
     $chkRiot = New-PremiumCheck "Riot Client cache/logs" (New-Object System.Drawing.Point(20, 244)) $false
     $cardClean.Controls.AddRange(@($chkCleanShader, $chkSteam, $chkEpic, $chkRiot))
 
-    $btnCleanup = New-PremiumButton "Run Cleanup" (New-Object System.Drawing.Point(760, 250)) (New-Object System.Drawing.Size(200, 44)) "Primary"
+    $btnCleanup = New-PremiumButton "Run Cleanup" (New-Object System.Drawing.Point(20, 280)) (New-Object System.Drawing.Size(200, 44)) "Primary"
+    $btnCleanup.Anchor = "Bottom,Right"
     $cardClean.Controls.Add($btnCleanup)
+    $cardClean.Add_Resize({
+        param($sender, $e)
+        $btnCleanup.Left = $sender.ClientSize.Width - 220
+        $btnCleanup.Top = $sender.ClientSize.Height - 60
+        $cleanHint.Width = $sender.ClientSize.Width - 40
+    })
 
     # ---- UPDATES ----
     $pageUpd = New-Content "Updates"
-    $cardUpd = New-CardPanel (New-Object System.Drawing.Point(24, 16)) (New-Object System.Drawing.Size(1000, 320)) "Updates"
-    $cardUpd.Anchor = "Top,Bottom,Left,Right"
+    $cardUpd = New-CardPanel "Updates" "Fill"
     $pageUpd.Controls.Add($cardUpd)
 
     $updHint = New-Object System.Windows.Forms.Label
     $updHint.Text = "Run updates when you are not in a ranked match. Driver apps open separately."
     $updHint.ForeColor = $t.Muted
     $updHint.Location = New-Object System.Drawing.Point(20, 48)
-    $updHint.Size = New-Object System.Drawing.Size(940, 28)
+    $updHint.Size = New-Object System.Drawing.Size(900, 28)
+    $updHint.Anchor = "Top,Left,Right"
     $cardUpd.Controls.Add($updHint)
 
     $chkUpdRestore = New-PremiumCheck "Create restore point first" (New-Object System.Drawing.Point(20, 96)) $true
@@ -668,48 +892,104 @@ function Show-MaintenanceGui {
     $btnUpdates = New-PremiumButton "Run Updates" (New-Object System.Drawing.Point(20, 240)) (New-Object System.Drawing.Size(180, 44)) "Primary"
     $btnAmd = New-PremiumButton "Open AMD Adrenalin" (New-Object System.Drawing.Point(220, 240)) (New-Object System.Drawing.Size(200, 44)) "Ghost"
     $btnNv = New-PremiumButton "Open NVIDIA App" (New-Object System.Drawing.Point(440, 240)) (New-Object System.Drawing.Size(180, 44)) "Ghost"
+    $btnUpdates.Anchor = "Bottom,Left"
+    $btnAmd.Anchor = "Bottom,Left"
+    $btnNv.Anchor = "Bottom,Left"
     $cardUpd.Controls.AddRange(@($btnUpdates, $btnAmd, $btnNv))
+    $cardUpd.Add_Resize({
+        param($sender, $e)
+        $y = $sender.ClientSize.Height - 60
+        $btnUpdates.Top = $y
+        $btnAmd.Top = $y
+        $btnNv.Top = $y
+        $updHint.Width = $sender.ClientSize.Width - 40
+    })
 
     # ---- GAMING ----
     $pageGame = New-Content "Gaming"
-    $cardGameStatus = New-CardPanel (New-Object System.Drawing.Point(24, 16)) (New-Object System.Drawing.Size(620, 320)) "Gaming Status"
-    $cardGameStatus.Anchor = "Top,Bottom,Left"
-    $pageGame.Controls.Add($cardGameStatus)
+    $gameSplit = New-Object System.Windows.Forms.TableLayoutPanel
+    $gameSplit.Dock = "Fill"
+    $gameSplit.ColumnCount = 2
+    $gameSplit.RowCount = 1
+    [void]$gameSplit.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 62)))
+    [void]$gameSplit.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 38)))
+    $pageGame.Controls.Add($gameSplit)
 
-    $rowGm = New-GameStatusRow (New-Object System.Drawing.Point(12, 48)) 590 "E7FC" "Game Mode"
-    $rowDvr = New-GameStatusRow (New-Object System.Drawing.Point(12, 100)) 590 "E7FC" "Xbox Game DVR"
-    $rowRelive = New-GameStatusRow (New-Object System.Drawing.Point(12, 152)) 590 "E7F4" "AMD ReLive"
-    $rowPower = New-GameStatusRow (New-Object System.Drawing.Point(12, 204)) 590 "E945" "Power Plan"
-    $rowDiscord = New-GameStatusRow (New-Object System.Drawing.Point(12, 256)) 590 "E8BD" "Discord HW accel"
-    $cardGameStatus.Controls.AddRange(@($rowGm.Panel, $rowDvr.Panel, $rowRelive.Panel, $rowPower.Panel, $rowDiscord.Panel))
+    $gameLeft = New-Object System.Windows.Forms.Panel
+    $gameLeft.Dock = "Fill"
+    $gameLeft.Padding = New-Object System.Windows.Forms.Padding(0, 0, 12, 0)
+    $gameSplit.Controls.Add($gameLeft, 0, 0)
 
-    $cardGameActions = New-CardPanel (New-Object System.Drawing.Point(668, 16)) (New-Object System.Drawing.Size(360, 320)) "Actions"
-    $cardGameActions.Anchor = "Top,Right"
-    $pageGame.Controls.Add($cardGameActions)
+    $cardGameStatus = New-CardPanel "Gaming Status" "Fill"
+    $gameLeft.Controls.Add($cardGameStatus)
 
-    $btnGamingOpt = New-PremiumButton "Apply gaming optimize" (New-Object System.Drawing.Point(24, 60)) (New-Object System.Drawing.Size(310, 52)) "Primary"
-    $btnDiscordOff = New-PremiumButton "Discord HW accel OFF" (New-Object System.Drawing.Point(24, 128)) (New-Object System.Drawing.Size(310, 52)) "Ghost"
-    $btnRefreshGame = New-PremiumButton "Refresh status" (New-Object System.Drawing.Point(24, 196)) (New-Object System.Drawing.Size(310, 52)) "Ghost"
-    $cardGameActions.Controls.AddRange(@($btnGamingOpt, $btnDiscordOff, $btnRefreshGame))
+    $rowsHost = New-Object System.Windows.Forms.Panel
+    $rowsHost.Location = New-Object System.Drawing.Point(8, 44)
+    $rowsHost.Size = New-Object System.Drawing.Size(560, 260)
+    $rowsHost.Anchor = "Top,Bottom,Left,Right"
+    $rowsHost.BackColor = $t.Panel
+    $cardGameStatus.Controls.Add($rowsHost)
+
+    $rowDiscord = New-GameStatusRow "E8BD" "Discord HW accel"
+    $rowPower = New-GameStatusRow "E945" "Power Plan"
+    $rowRelive = New-GameStatusRow "E7F4" "AMD ReLive"
+    $rowDvr = New-GameStatusRow "E722" "Xbox Game DVR"
+    $rowGm = New-GameStatusRow "E7FC" "Game Mode"
+    $rowsHost.Controls.Add($rowDiscord.Panel)
+    $rowsHost.Controls.Add($rowPower.Panel)
+    $rowsHost.Controls.Add($rowRelive.Panel)
+    $rowsHost.Controls.Add($rowDvr.Panel)
+    $rowsHost.Controls.Add($rowGm.Panel)
+
+    $cardGameStatus.Add_Resize({
+        param($sender, $e)
+        $rowsHost.Width = $sender.ClientSize.Width - 16
+        $rowsHost.Height = $sender.ClientSize.Height - 52
+    })
+
+    $gameRight = New-Object System.Windows.Forms.Panel
+    $gameRight.Dock = "Fill"
+    $gameRight.Padding = New-Object System.Windows.Forms.Padding(12, 0, 0, 0)
+    $gameSplit.Controls.Add($gameRight, 1, 0)
+
+    $cardGameActions = New-CardPanel "Actions" "Fill"
+    $gameRight.Controls.Add($cardGameActions)
+
+    $btnGamingOpt = New-PremiumButton "Apply gaming optimize" (New-Object System.Drawing.Point(24, 52)) (New-Object System.Drawing.Size(280, 48)) "Primary"
+    $btnFixPower = New-PremiumButton "Fix power plan (Ultimate)" (New-Object System.Drawing.Point(24, 112)) (New-Object System.Drawing.Size(280, 48)) "Ghost"
+    $btnDiscordOff = New-PremiumButton "Discord HW accel OFF" (New-Object System.Drawing.Point(24, 172)) (New-Object System.Drawing.Size(280, 48)) "Ghost"
+    $btnRefreshGame = New-PremiumButton "Refresh status" (New-Object System.Drawing.Point(24, 232)) (New-Object System.Drawing.Size(280, 48)) "Ghost"
+    $cardGameActions.Controls.AddRange(@($btnGamingOpt, $btnFixPower, $btnDiscordOff, $btnRefreshGame))
 
     $gameTip = New-Object System.Windows.Forms.Label
     $gameTip.Text = "Tip: Fullscreen + FPS near refresh rate usually beats uncapped FPS."
     $gameTip.ForeColor = $t.Muted
-    $gameTip.Location = New-Object System.Drawing.Point(24, 270)
-    $gameTip.Size = New-Object System.Drawing.Size(310, 36)
+    $gameTip.Location = New-Object System.Drawing.Point(24, 292)
+    $gameTip.Size = New-Object System.Drawing.Size(280, 40)
+    $gameTip.Anchor = "Bottom,Left,Right"
     $cardGameActions.Controls.Add($gameTip)
+
+    $cardGameActions.Add_Resize({
+        param($sender, $e)
+        $w = [math]::Max(200, $sender.ClientSize.Width - 48)
+        foreach ($b in @($btnGamingOpt, $btnFixPower, $btnDiscordOff, $btnRefreshGame)) {
+            $b.Width = $w
+        }
+        $gameTip.Width = $w
+        $gameTip.Top = $sender.ClientSize.Height - 48
+    })
 
     # ---- REPAIR ----
     $pageRepair = New-Content "Repair"
-    $cardRepair = New-CardPanel (New-Object System.Drawing.Point(24, 16)) (New-Object System.Drawing.Size(1000, 320)) "Repair"
-    $cardRepair.Anchor = "Top,Bottom,Left,Right"
+    $cardRepair = New-CardPanel "Repair" "Fill"
     $pageRepair.Controls.Add($cardRepair)
 
     $repHint = New-Object System.Windows.Forms.Label
     $repHint.Text = "Only when Windows feels broken. DISM + SFC can take 10-30+ minutes."
     $repHint.ForeColor = $t.Muted
     $repHint.Location = New-Object System.Drawing.Point(20, 52)
-    $repHint.Size = New-Object System.Drawing.Size(940, 28)
+    $repHint.Size = New-Object System.Drawing.Size(900, 28)
+    $repHint.Anchor = "Top,Left,Right"
     $cardRepair.Controls.Add($repHint)
 
     $chkRepRestore = New-PremiumCheck "Create restore point first" (New-Object System.Drawing.Point(20, 100)) $true
@@ -721,9 +1001,21 @@ function Show-MaintenanceGui {
 
     # ---- DEVICE ----
     $pageDev = New-Content "Device"
-    $cardDev = New-CardPanel (New-Object System.Drawing.Point(24, 16)) (New-Object System.Drawing.Size(620, 320)) "Device"
-    $cardDev.Anchor = "Top,Bottom,Left"
-    $pageDev.Controls.Add($cardDev)
+    $devSplit = New-Object System.Windows.Forms.TableLayoutPanel
+    $devSplit.Dock = "Fill"
+    $devSplit.ColumnCount = 2
+    $devSplit.RowCount = 1
+    [void]$devSplit.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 62)))
+    [void]$devSplit.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 38)))
+    $pageDev.Controls.Add($devSplit)
+
+    $devLeft = New-Object System.Windows.Forms.Panel
+    $devLeft.Dock = "Fill"
+    $devLeft.Padding = New-Object System.Windows.Forms.Padding(0, 0, 12, 0)
+    $devSplit.Controls.Add($devLeft, 0, 0)
+
+    $cardDev = New-CardPanel "Device" "Fill"
+    $devLeft.Controls.Add($cardDev)
 
     $deviceSummary = New-Object System.Windows.Forms.TextBox
     $deviceSummary.Multiline = $true
@@ -734,109 +1026,41 @@ function Show-MaintenanceGui {
     $deviceSummary.ForeColor = $t.Text
     $deviceSummary.Font = New-Object System.Drawing.Font("Consolas", 9.5)
     $deviceSummary.Location = New-Object System.Drawing.Point(16, 48)
-    $deviceSummary.Size = New-Object System.Drawing.Size(588, 250)
+    $deviceSummary.Size = New-Object System.Drawing.Size(500, 250)
+    $deviceSummary.Anchor = "Top,Bottom,Left,Right"
     $cardDev.Controls.Add($deviceSummary)
 
-    $cardDevAct = New-CardPanel (New-Object System.Drawing.Point(668, 16)) (New-Object System.Drawing.Size(360, 320)) "Quick Actions"
-    $cardDevAct.Anchor = "Top,Right"
-    $pageDev.Controls.Add($cardDevAct)
+    $devRight = New-Object System.Windows.Forms.Panel
+    $devRight.Dock = "Fill"
+    $devRight.Padding = New-Object System.Windows.Forms.Padding(12, 0, 0, 0)
+    $devSplit.Controls.Add($devRight, 1, 0)
 
-    $btnRefreshDevice = New-PremiumButton "Refresh" (New-Object System.Drawing.Point(24, 52)) (New-Object System.Drawing.Size(310, 36)) "Ghost"
-    $btnFixPower = New-PremiumButton "Fix power plan (Ultimate)" (New-Object System.Drawing.Point(24, 98)) (New-Object System.Drawing.Size(310, 36)) "Muted"
-    $btnApplyGamingDevice = New-PremiumButton "Apply gaming optimize" (New-Object System.Drawing.Point(24, 144)) (New-Object System.Drawing.Size(310, 36)) "Primary"
-    $btnCopyRamTip = New-PremiumButton "Copy RAM upgrade tip" (New-Object System.Drawing.Point(24, 190)) (New-Object System.Drawing.Size(310, 36)) "Ghost"
-    $btnOpenStorage = New-PremiumButton "Open Storage settings" (New-Object System.Drawing.Point(24, 236)) (New-Object System.Drawing.Size(310, 36)) "Muted"
-    $btnRestartNow = New-PremiumButton "Restart PC now" (New-Object System.Drawing.Point(24, 282)) (New-Object System.Drawing.Size(310, 36)) "Danger"
-    $cardDevAct.Controls.AddRange(@($btnRefreshDevice, $btnFixPower, $btnApplyGamingDevice, $btnCopyRamTip, $btnOpenStorage, $btnRestartNow))
+    $cardDevAct = New-CardPanel "Quick Actions" "Fill"
+    $devRight.Controls.Add($cardDevAct)
 
-    # ---- LOG FOOTER ----
-    $logCard = New-Object System.Windows.Forms.Panel
-    $logCard.Location = New-Object System.Drawing.Point(24, 490)
-    $logCard.Size = New-Object System.Drawing.Size(1000, 180)
-    $logCard.BackColor = $t.Panel
-    $logCard.Anchor = "Bottom,Left,Right"
-    Add-PanelBorder $logCard $t.Accent
-    $form.Controls.Add($logCard)
+    $btnRefreshDevice = New-PremiumButton "Refresh" (New-Object System.Drawing.Point(24, 52)) (New-Object System.Drawing.Size(280, 40)) "Ghost"
+    $btnCopyRamTip = New-PremiumButton "Copy RAM upgrade tip" (New-Object System.Drawing.Point(24, 104)) (New-Object System.Drawing.Size(280, 40)) "Ghost"
+    $btnOpenStorage = New-PremiumButton "Open Storage settings" (New-Object System.Drawing.Point(24, 156)) (New-Object System.Drawing.Size(280, 40)) "Muted"
+    $btnRestartNow = New-PremiumButton "Restart PC now" (New-Object System.Drawing.Point(24, 208)) (New-Object System.Drawing.Size(280, 40)) "Danger"
+    $cardDevAct.Controls.AddRange(@($btnRefreshDevice, $btnCopyRamTip, $btnOpenStorage, $btnRestartNow))
 
-    $logTitle = New-Object System.Windows.Forms.Label
-    $logTitle.Text = "Maintenance Log"
-    $logTitle.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
-    $logTitle.ForeColor = $t.Accent
-    $logTitle.AutoSize = $true
-    $logTitle.Location = New-Object System.Drawing.Point(16, 10)
-    $logCard.Controls.Add($logTitle)
+    $devTip = New-Object System.Windows.Forms.Label
+    $devTip.Text = "Gaming optimize and power plan live on the Gaming tab."
+    $devTip.ForeColor = $t.Muted
+    $devTip.Location = New-Object System.Drawing.Point(24, 270)
+    $devTip.Size = New-Object System.Drawing.Size(280, 40)
+    $devTip.Anchor = "Bottom,Left,Right"
+    $cardDevAct.Controls.Add($devTip)
 
-    $btnClearLog = New-Object System.Windows.Forms.LinkLabel
-    $btnClearLog.Text = "Clear log"
-    $btnClearLog.LinkColor = $t.Accent
-    $btnClearLog.ActiveLinkColor = $t.Text
-    $btnClearLog.Location = New-Object System.Drawing.Point(900, 12)
-    $btnClearLog.AutoSize = $true
-    $btnClearLog.Anchor = "Top,Right"
-    $logCard.Controls.Add($btnClearLog)
-
-    $log = New-Object System.Windows.Forms.RichTextBox
-    $log.Location = New-Object System.Drawing.Point(16, 36)
-    $log.Size = New-Object System.Drawing.Size(968, 80)
-    $log.BackColor = $t.LogBg
-    $log.ForeColor = $t.Accent
-    $log.Font = New-Object System.Drawing.Font("Consolas", 9)
-    $log.ReadOnly = $true
-    $log.BorderStyle = "None"
-    $log.Anchor = "Top,Bottom,Left,Right"
-    $logCard.Controls.Add($log)
-
-    $progressTrack = New-Object System.Windows.Forms.Panel
-    $progressTrack.Location = New-Object System.Drawing.Point(16, 128)
-    $progressTrack.Size = New-Object System.Drawing.Size(700, 12)
-    $progressTrack.BackColor = $t.IconBox
-    $progressTrack.Anchor = "Bottom,Left,Right"
-    $logCard.Controls.Add($progressTrack)
-
-    $progressFill = New-Object System.Windows.Forms.Panel
-    $progressFill.Location = New-Object System.Drawing.Point(0, 0)
-    $progressFill.Size = New-Object System.Drawing.Size(0, 12)
-    $progressFill.BackColor = $t.Accent
-    $progressTrack.Controls.Add($progressFill)
-
-    $progress = New-Object System.Windows.Forms.ProgressBar
-    $progress.Visible = $false
-    $progress.Minimum = 0
-    $progress.Maximum = 100
-    $progress.Value = 0
-    $logCard.Controls.Add($progress)
-
-    $progLbl = New-Object System.Windows.Forms.Label
-    $progLbl.Text = "Overall Progress"
-    $progLbl.ForeColor = $t.Muted
-    $progLbl.Location = New-Object System.Drawing.Point(16, 146)
-    $progLbl.AutoSize = $true
-    $progLbl.Anchor = "Bottom,Left"
-    $logCard.Controls.Add($progLbl)
-
-    $status = New-Object System.Windows.Forms.Label
-    $status.Text = "Ready"
-    $status.ForeColor = $t.Muted
-    $status.Location = New-Object System.Drawing.Point(150, 146)
-    $status.Size = New-Object System.Drawing.Size(400, 18)
-    $status.Anchor = "Bottom,Left"
-    $logCard.Controls.Add($status)
-
-    $statusBar = New-Object System.Windows.Forms.Label
-    $statusBar.Text = "Ready"
-    $statusBar.ForeColor = $t.Muted
-    $statusBar.Location = New-Object System.Drawing.Point(560, 146)
-    $statusBar.Size = New-Object System.Drawing.Size(160, 18)
-    $statusBar.Anchor = "Bottom,Left,Right"
-    $logCard.Controls.Add($statusBar)
-
-    $btnLogs = New-PremiumButton "View Full Log" (New-Object System.Drawing.Point(740, 128)) (New-Object System.Drawing.Size(120, 32)) "Muted"
-    $btnCli = New-PremiumButton "CLI" (New-Object System.Drawing.Point(870, 128)) (New-Object System.Drawing.Size(54, 32)) "Muted"
-    $btnQuit = New-PremiumButton "Quit" (New-Object System.Drawing.Point(934, 128)) (New-Object System.Drawing.Size(50, 32)) "Danger"
-    $btnLogs.Anchor = "Bottom,Right"
-    $btnCli.Anchor = "Bottom,Right"
-    $btnQuit.Anchor = "Bottom,Right"
-    $logCard.Controls.AddRange(@($btnLogs, $btnCli, $btnQuit))
+    $cardDevAct.Add_Resize({
+        param($sender, $e)
+        $w = [math]::Max(200, $sender.ClientSize.Width - 48)
+        foreach ($b in @($btnRefreshDevice, $btnCopyRamTip, $btnOpenStorage, $btnRestartNow)) {
+            $b.Width = $w
+        }
+        $devTip.Width = $w
+        $devTip.Top = $sender.ClientSize.Height - 48
+    })
 
     $Script:GuiControls = [pscustomobject]@{
         Form            = $form
@@ -846,7 +1070,7 @@ function Show-MaintenanceGui {
         CpuMain         = $cpuCard.Main
         CpuStat         = $cpuCard.Stat
         GpuMain         = $gpuCard.Main
-        GpuStat          = $gpuCard.Stat
+        GpuStat         = $gpuCard.Stat
         RamMain         = $ramCard.Main
         RamStat         = $ramCard.Stat
         DeviceSummary   = $deviceSummary
@@ -876,7 +1100,6 @@ function Show-MaintenanceGui {
         BtnGamingOpt    = $btnGamingOpt
         BtnRefreshDevice = $btnRefreshDevice
         BtnFixPower     = $btnFixPower
-        BtnApplyGamingDevice = $btnApplyGamingDevice
         BtnCopyRamTip   = $btnCopyRamTip
         BtnRestartNow   = $btnRestartNow
         BtnOpenStorage  = $btnOpenStorage
@@ -1032,6 +1255,21 @@ function Show-MaintenanceGui {
         }
     })
 
+    $btnFixPower.Add_Click({
+        Invoke-GuiAction -Title "Fix power plan" -Action {
+            Init-Log
+            $Script:Report.Clear()
+            $Script:TotalSteps = 1
+            $Script:CurrentStep = 0
+            Write-Step "Power plan"
+            $ok = Enable-UltimatePerformancePlan
+            $name = Get-ActivePowerPlanName
+            if ($ok) { Write-Ok "Active plan: $name" } else { Write-Ok "Set best available plan: $name" }
+            Update-GuiDevicePanel
+            Update-GuiGamingStatus
+        }
+    })
+
     $btnDiscordOff.Add_Click({
         try {
             Set-DiscordHardwareAcceleration $false
@@ -1101,37 +1339,6 @@ function Show-MaintenanceGui {
             $Script:TotalSteps = 1
             $Script:CurrentStep = 0
             Invoke-DeviceHealthReport
-        }
-    })
-
-    $btnFixPower.Add_Click({
-        Invoke-GuiAction -Title "Fix power plan" -Action {
-            Init-Log
-            $Script:Report.Clear()
-            $Script:TotalSteps = 1
-            $Script:CurrentStep = 0
-            Write-Step "Power plan"
-            $ok = Enable-UltimatePerformancePlan
-            $name = Get-ActivePowerPlanName
-            if ($ok) { Write-Ok "Active plan: $name" } else { Write-Ok "Set best available plan: $name" }
-            Update-GuiDevicePanel
-            Update-GuiGamingStatus
-        }
-    })
-
-    $btnApplyGamingDevice.Add_Click({
-        Invoke-GuiAction -Title "Gaming optimize" -Action {
-            $logBox = Get-UiControl Log
-            if ($logBox) { $logBox.Clear() }
-            Init-Log
-            $Script:Report.Clear()
-            $Script:RunStart = Get-Date
-            $Script:TotalSteps = 2
-            $Script:CurrentStep = 0
-            Invoke-GamingOptimize
-            Invoke-GamingChecks
-            Update-GuiGamingStatus
-            Update-GuiDevicePanel
         }
     })
 
