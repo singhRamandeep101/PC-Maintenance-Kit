@@ -1,3 +1,56 @@
+function Get-InstalledRamPartNumbers {
+    $parts = @(Get-CimInstance Win32_PhysicalMemory -EA SilentlyContinue | ForEach-Object {
+        if ($_.PartNumber) { $_.PartNumber.Trim() }
+    } | Where-Object { $_ } | Select-Object -Unique)
+    return $parts
+}
+
+function Get-RamUpgradeTip {
+    $s = Get-DeviceSummary
+    $parts = Get-InstalledRamPartNumbers
+    $part = if ($parts.Count) { $parts[0] } else { $null }
+    if ($s.RamChannels -match 'Single' -or $s.RamSticks -eq 1) {
+        if ($part) {
+            return "You have 1 stick ($part). Buy a matching second stick of the same model for dual-channel. Search: $part"
+        }
+        return "You have single-channel RAM. Add a matching second stick (same size/speed) for dual-channel - big gaming 1% lows win."
+    }
+    return "RAM looks multi-stick. Confirm dual-channel in Task Manager > Performance > Memory."
+}
+
+function Copy-RamUpgradeTipToClipboard {
+    $tip = Get-RamUpgradeTip
+    Set-Clipboard -Value $tip
+    return $tip
+}
+
+function Invoke-RestartComputerConfirmed {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+    $r = [System.Windows.Forms.MessageBox]::Show(
+        "Restart this PC now?`nSave your game / work first.",
+        "Confirm restart",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Warning
+    )
+    if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return $false }
+    Restart-Computer -Force
+    return $true
+}
+
+function Open-StorageSettings {
+    try {
+        Start-Process "ms-settings:storagesense"
+        return $true
+    } catch {
+        try {
+            Start-Process explorer.exe "shell:::{F96C3FC1-EB3B-4AFC-BB16-AA89C46AD1C7}"
+            return $true
+        } catch {
+            return $false
+        }
+    }
+}
+
 function Get-DeviceSummary {
     $cpu = (Get-CimInstance Win32_Processor -EA SilentlyContinue | Select-Object -First 1).Name
     if (-not $cpu) { $cpu = "Unknown CPU" }
@@ -8,6 +61,7 @@ function Get-DeviceSummary {
     $sticks = @(Get-CimInstance Win32_PhysicalMemory -EA SilentlyContinue)
     $ramGb = [math]::Round((($sticks | Measure-Object Capacity -Sum).Sum) / 1GB, 1)
     $ramSlots = $sticks.Count
+    $ramPart = if ($sticks.Count -and $sticks[0].PartNumber) { $sticks[0].PartNumber.Trim() } else { "" }
     $ramChannels = "Unknown"
     try {
         $channels = @($sticks | ForEach-Object { $_.BankLabel } | Where-Object { $_ } | ForEach-Object {
@@ -39,16 +93,17 @@ function Get-DeviceSummary {
     $reboot = Test-RebootPending
 
     return [pscustomobject]@{
-        Cpu          = $cpu.Trim()
-        Gpu          = $gpu
-        RamGb        = $ramGb
-        RamSticks    = $ramSlots
-        RamChannels  = $ramChannels
-        DiskName     = $diskName
-        DiskHealth   = $diskHealth
-        TrimInfo     = $trim
-        FreeGb       = $free
-        PowerPlan    = $power
+        Cpu           = $cpu.Trim()
+        Gpu           = $gpu
+        RamGb         = $ramGb
+        RamSticks     = $ramSlots
+        RamPartNumber = $ramPart
+        RamChannels   = $ramChannels
+        DiskName      = $diskName
+        DiskHealth    = $diskHealth
+        TrimInfo      = $trim
+        FreeGb        = $free
+        PowerPlan     = $power
         RebootPending = $reboot
     }
 }
@@ -56,16 +111,23 @@ function Get-DeviceSummary {
 function Format-DeviceSummaryText {
     $s = Get-DeviceSummary
     $rebootLine = if ($s.RebootPending) { "YES - restart recommended" } else { "No" }
-    @(
+    $ramPartLine = if ($s.RamPartNumber) { "RAM part:   $($s.RamPartNumber)" } else { $null }
+    $lines = @(
         "CPU:        $($s.Cpu)"
         "GPU:        $($s.Gpu)"
         "RAM:        $($s.RamGb) GB ($($s.RamSticks) stick(s)) - $($s.RamChannels)"
+    )
+    if ($ramPartLine) { $lines += $ramPartLine }
+    $lines += @(
         "Disk:       $($s.DiskName) [$($s.DiskHealth)]"
         "TRIM:       $($s.TrimInfo)"
         "C: free:    $($s.FreeGb) GB"
         "Power:      $($s.PowerPlan)"
         "Reboot:     $rebootLine"
-    ) -join "`r`n"
+        ""
+        "Tip: $(Get-RamUpgradeTip)"
+    )
+    return ($lines -join "`r`n")
 }
 
 function Invoke-DeviceHealthReport {
@@ -75,6 +137,7 @@ function Invoke-DeviceHealthReport {
     Write-Ok ("GPU: {0}" -f $s.Gpu)
     if ($s.RamChannels -match 'Single') {
         Write-Warn ("RAM: {0} GB / {1} stick(s) - {2}" -f $s.RamGb, $s.RamSticks, $s.RamChannels)
+        if ($s.RamPartNumber) { Write-Info ("Part number: {0}" -f $s.RamPartNumber) }
     } else {
         Write-Ok ("RAM: {0} GB / {1} stick(s) - {2}" -f $s.RamGb, $s.RamSticks, $s.RamChannels)
     }

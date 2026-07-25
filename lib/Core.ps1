@@ -122,7 +122,10 @@ function Ensure-Admin {
     }
 
     $ps = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-    $arguments = "-NoProfile -ExecutionPolicy Bypass -STA -File `"$ScriptPath`""
+    $hideGui = ($RelaunchArgs -match '-Mode\s+Gui')
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -STA"
+    if ($hideGui) { $arguments += " -WindowStyle Hidden" }
+    $arguments += " -File `"$ScriptPath`""
     if ($RelaunchArgs) { $arguments += " $RelaunchArgs" }
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -145,7 +148,7 @@ function Init-Log {
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $stamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
     $Script:LogFile = Join-Path $dir "maintenance_$stamp.log"
-    "PC Maintenance v4 started: $(Get-Date)" | Out-File $Script:LogFile -Encoding UTF8
+    "PC Maintenance Kit v5 started: $(Get-Date)" | Out-File $Script:LogFile -Encoding UTF8
 }
 
 function Write-Log([string]$msg) {
@@ -161,15 +164,20 @@ function Get-Elapsed {
 
 function Update-UiProgress {
     param([string]$Label = "")
-    if ($Script:TotalSteps -le 0) { return }
+    if ($Script:TotalSteps -le 0) {
+        if ($Label) { Set-UiStatusText -Text $Label }
+        if (Get-Command Update-GuiStatusBar -EA SilentlyContinue) { Update-GuiStatusBar -JobText $Label }
+        return
+    }
     $pct = [math]::Min(100, [math]::Round(($Script:CurrentStep / $Script:TotalSteps) * 100))
     Set-UiProgressValue -Value ([int]$pct)
-    Set-UiStatusText -Text ("Step {0}/{1}  {2}  {3}" -f $Script:CurrentStep, $Script:TotalSteps, (Get-Elapsed), $Label)
-    $width = 30
-    $filled = [math]::Round(($pct / 100) * $width)
-    $bar = ("#" * $filled) + ("-" * ($width - $filled))
+    $plain = ("Running: {0}  ·  {1}/{2}  ·  {3}" -f $Label, $Script:CurrentStep, $Script:TotalSteps, (Get-Elapsed))
+    Set-UiStatusText -Text $plain
+    if (Get-Command Update-GuiStatusBar -EA SilentlyContinue) {
+        Update-GuiStatusBar -JobText $plain
+    }
     try {
-        $host.UI.RawUI.WindowTitle = "PC Maintenance  [$bar] $pct%  $($Script:CurrentStep)/$($Script:TotalSteps)  $(Get-Elapsed)  $Label"
+        $host.UI.RawUI.WindowTitle = "PC Maintenance Kit  $pct%  $($Script:CurrentStep)/$($Script:TotalSteps)  $(Get-Elapsed)"
     } catch { }
     Pump-Ui
 }
@@ -186,10 +194,11 @@ function Append-UiLog {
         'Gray'   { [System.Drawing.Color]::FromArgb(140, 150, 160) }
         default  { [System.Drawing.Color]::FromArgb(220, 225, 230) }
     }
+    $stamp = Get-Date -Format "HH:mm:ss"
     $box.SelectionStart = $box.TextLength
     $box.SelectionLength = 0
     $box.SelectionColor = $color
-    $box.AppendText("$msg`r`n")
+    $box.AppendText("[$stamp] $msg`r`n")
     $box.SelectionStart = $box.TextLength
     $box.ScrollToCaret()
     Pump-Ui
@@ -200,7 +209,7 @@ function Write-Step([string]$msg) {
     Write-Host ""
     Write-Host "=== [$($Script:CurrentStep)/$($Script:TotalSteps)] $msg ===" -ForegroundColor Cyan
     Update-UiProgress -Label $msg
-    Append-UiLog "=== [$($Script:CurrentStep)/$($Script:TotalSteps)] $msg ===" "Cyan"
+    Append-UiLog (">> [{0}/{1}] {2}" -f $Script:CurrentStep, $Script:TotalSteps, $msg) "Cyan"
     Write-Log "STEP $($Script:CurrentStep)/$($Script:TotalSteps): $msg"
 }
 

@@ -4,6 +4,8 @@ PC-Maintenance-Logs/
 Thumbs.db
 *.rar
 *.zip
+!dist/*.zip
 _boottest.ps1
 pathcheck.ps1
 _*.ps1
+dist/PC-Maintenance-Kit-v*/

@@ -29,7 +29,7 @@ try {
     Ensure-Admin -ScriptPath $PSCommandPath -RelaunchArgs $relaunch
 
     $ErrorActionPreference = 'Continue'
-    try { $host.UI.RawUI.WindowTitle = "PC Maintenance Kit v5" } catch { }
+    try { $host.UI.RawUI.WindowTitle = "PC Maintenance Kit v5.1" } catch { }
     $Script:TempOlderThanDays = $TempOlderThanDays
 
     switch ($Mode) {

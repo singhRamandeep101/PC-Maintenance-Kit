@@ -1,4 +1,26 @@
 $Script:GuiBusy = $false
+$Script:LastJobText = "Ready"
+
+function Update-GuiStatusBar {
+    param([string]$JobText = "")
+    if ($JobText) { $Script:LastJobText = $JobText }
+    $bar = $null
+    if ($Script:GuiControls -and $Script:GuiControls.StatusBar) {
+        $bar = $Script:GuiControls.StatusBar
+    }
+    if (-not $bar) { return }
+    $free = "-"
+    try { $free = "{0} GB" -f (Get-CFreeGB) } catch { }
+    $admin = "User"
+    try {
+        $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $p = [Security.Principal.WindowsPrincipal]::new($id)
+        if ($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { $admin = "Admin" }
+    } catch { }
+    $state = if ($Script:GuiBusy) { "Busy" } else { "Ready" }
+    $job = if ($Script:LastJobText) { $Script:LastJobText } else { "Ready" }
+    $bar.Text = ("{0}  |  {1}  |  C: free {2}  |  {3}" -f $state, $admin, $free, $job)
+}
 
 function New-DarkButton {
     param(
@@ -39,11 +61,18 @@ function Set-GuiBusy([bool]$Busy) {
             $ctrl.Enabled = -not $Busy
         }
     }
-    $runBtns = @('BtnWeekly','BtnCleanup','BtnUpdates','BtnRepair','BtnGamingOpt','BtnRefreshDevice')
+    $runBtns = @(
+        'BtnWeekly','BtnCleanup','BtnUpdates','BtnRepair','BtnGamingOpt','BtnRefreshDevice',
+        'BtnFixPower','BtnApplyGamingDevice','BtnCopyRamTip','BtnRestartNow','BtnOpenStorage'
+    )
     foreach ($n in $runBtns) {
         $b = $Script:GuiControls.$n
         if ($b) { $b.Enabled = -not $Busy }
     }
+    if (-not $Busy) {
+        $Script:LastJobText = "Ready"
+    }
+    Update-GuiStatusBar
 }
 
 function Invoke-GuiAction {
@@ -133,7 +162,7 @@ function Show-MaintenanceGui {
     $btnBg   = [System.Drawing.Color]::FromArgb(42, 50, 60)
 
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "PC Maintenance Kit v5 - Gamer Toolkit"
+    $form.Text = "PC Maintenance Kit v5.1 - Gamer Toolkit"
     $form.Size = New-Object System.Drawing.Size(980, 720)
     $form.StartPosition = "CenterScreen"
     $form.BackColor = $bg
@@ -325,10 +354,10 @@ function Show-MaintenanceGui {
     # ---- Device ----
     $tabDev = Add-Tab "Device"
     $devIntro = New-Object System.Windows.Forms.Label
-    $devIntro.Text = "Hardware snapshot. Single-channel RAM is a common cause of gaming microstutter."
+    $devIntro.Text = "Hardware snapshot with one-click fixes. Single-channel RAM is a common microstutter cause."
     $devIntro.ForeColor = $muted
     $devIntro.Location = New-Object System.Drawing.Point(16, 16)
-    $devIntro.Size = New-Object System.Drawing.Size(860, 36)
+    $devIntro.Size = New-Object System.Drawing.Size(860, 28)
     $tabDev.Controls.Add($devIntro)
 
     $deviceSummary = New-Object System.Windows.Forms.TextBox
@@ -339,13 +368,18 @@ function Show-MaintenanceGui {
     $deviceSummary.ForeColor = $text
     $deviceSummary.BorderStyle = "FixedSingle"
     $deviceSummary.Font = New-Object System.Drawing.Font("Consolas", 9)
-    $deviceSummary.Location = New-Object System.Drawing.Point(16, 56)
-    $deviceSummary.Size = New-Object System.Drawing.Size(700, 220)
-    $deviceSummary.Anchor = "Top,Bottom,Left,Right"
+    $deviceSummary.Location = New-Object System.Drawing.Point(16, 48)
+    $deviceSummary.Size = New-Object System.Drawing.Size(560, 240)
+    $deviceSummary.Anchor = "Top,Bottom,Left"
     $tabDev.Controls.Add($deviceSummary)
 
-    $btnRefreshDevice = New-DarkButton "Refresh" (New-Object System.Drawing.Point(740, 56)) (New-Object System.Drawing.Size(140, 40)) $accent2
-    $tabDev.Controls.Add($btnRefreshDevice)
+    $btnRefreshDevice = New-DarkButton "Refresh" (New-Object System.Drawing.Point(600, 48)) (New-Object System.Drawing.Size(280, 36)) $accent2
+    $btnFixPower = New-DarkButton "Fix power plan (Ultimate)" (New-Object System.Drawing.Point(600, 96)) (New-Object System.Drawing.Size(280, 36)) $btnBg
+    $btnApplyGamingDevice = New-DarkButton "Apply gaming optimize" (New-Object System.Drawing.Point(600, 144)) (New-Object System.Drawing.Size(280, 36)) $accent
+    $btnCopyRamTip = New-DarkButton "Copy RAM upgrade tip" (New-Object System.Drawing.Point(600, 192)) (New-Object System.Drawing.Size(280, 36)) $btnBg
+    $btnOpenStorage = New-DarkButton "Open Storage settings" (New-Object System.Drawing.Point(600, 240)) (New-Object System.Drawing.Size(280, 36)) $btnBg
+    $btnRestartNow = New-DarkButton "Restart PC now" (New-Object System.Drawing.Point(600, 288)) (New-Object System.Drawing.Size(280, 36)) $warn
+    $tabDev.Controls.AddRange(@($btnRefreshDevice, $btnFixPower, $btnApplyGamingDevice, $btnCopyRamTip, $btnOpenStorage, $btnRestartNow))
 
     # ---- Shared log / progress ----
     $progress = New-Object System.Windows.Forms.ProgressBar
@@ -361,6 +395,15 @@ function Show-MaintenanceGui {
     $status.AutoSize = $true
     $status.Anchor = "Bottom,Left"
     $form.Controls.Add($status)
+
+    $statusBar = New-Object System.Windows.Forms.Label
+    $statusBar.Text = "Ready"
+    $statusBar.ForeColor = $muted
+    $statusBar.Location = New-Object System.Drawing.Point(280, 468)
+    $statusBar.Size = New-Object System.Drawing.Size(660, 18)
+    $statusBar.Anchor = "Bottom,Left,Right"
+    $statusBar.TextAlign = "MiddleRight"
+    $form.Controls.Add($statusBar)
 
     $log = New-Object System.Windows.Forms.RichTextBox
     $log.Location = New-Object System.Drawing.Point(20, 492)
@@ -385,6 +428,7 @@ function Show-MaintenanceGui {
         Form            = $form
         Free            = $freeLbl
         RebootBadge     = $rebootBadge
+        StatusBar       = $statusBar
         HomeSummary     = $homeSummary
         DeviceSummary   = $deviceSummary
         GamingStatus    = $gamingStatus
@@ -408,6 +452,11 @@ function Show-MaintenanceGui {
         BtnRepair       = $btnRepair
         BtnGamingOpt    = $btnGamingOpt
         BtnRefreshDevice = $btnRefreshDevice
+        BtnFixPower     = $btnFixPower
+        BtnApplyGamingDevice = $btnApplyGamingDevice
+        BtnCopyRamTip   = $btnCopyRamTip
+        BtnRestartNow   = $btnRestartNow
+        BtnOpenStorage  = $btnOpenStorage
     }
 
     $Script:Ui = [pscustomobject]@{
@@ -421,6 +470,7 @@ function Show-MaintenanceGui {
     Update-GuiHomeSummary
     Update-GuiDevicePanel
     Update-GuiGamingStatus
+    Update-GuiStatusBar -JobText "Ready"
 
     $btnWeekly.Add_Click({
         Invoke-GuiAction -Title "Weekly Full" -Action {
@@ -599,6 +649,7 @@ function Show-MaintenanceGui {
     $btnRefreshDevice.Add_Click({
         Update-GuiDevicePanel
         Update-GuiHomeSummary
+        Update-GuiStatusBar -JobText "Device refreshed"
         Invoke-GuiAction -Title "Device report" -Action {
             Init-Log
             $Script:Report.Clear()
@@ -606,6 +657,76 @@ function Show-MaintenanceGui {
             $Script:CurrentStep = 0
             Invoke-DeviceHealthReport
         }
+    })
+
+    $btnFixPower.Add_Click({
+        Invoke-GuiAction -Title "Fix power plan" -Action {
+            Init-Log
+            $Script:Report.Clear()
+            $Script:TotalSteps = 1
+            $Script:CurrentStep = 0
+            Write-Step "Power plan"
+            $ok = Enable-UltimatePerformancePlan
+            $name = Get-ActivePowerPlanName
+            if ($ok) { Write-Ok "Active plan: $name" } else { Write-Ok "Set best available plan: $name" }
+            Update-GuiDevicePanel
+            Update-GuiGamingStatus
+        }
+    })
+
+    $btnApplyGamingDevice.Add_Click({
+        Invoke-GuiAction -Title "Gaming optimize" -Action {
+            $logBox = Get-UiControl Log
+            if ($logBox) { $logBox.Clear() }
+            Init-Log
+            $Script:Report.Clear()
+            $Script:RunStart = Get-Date
+            $Script:TotalSteps = 2
+            $Script:CurrentStep = 0
+            Invoke-GamingOptimize
+            Invoke-GamingChecks
+            Update-GuiGamingStatus
+            Update-GuiDevicePanel
+        }
+    })
+
+    $btnCopyRamTip.Add_Click({
+        try {
+            $tip = Copy-RamUpgradeTipToClipboard
+            Append-UiLog "Copied to clipboard: $tip" "Cyan"
+            Update-GuiStatusBar -JobText "RAM tip copied"
+            [System.Windows.Forms.MessageBox]::Show(
+                $tip,
+                "RAM upgrade tip (copied)",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Information
+            ) | Out-Null
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show(
+                $_.Exception.Message,
+                "PC Maintenance",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            ) | Out-Null
+        }
+    })
+
+    $btnOpenStorage.Add_Click({
+        if (Open-StorageSettings) {
+            Append-UiLog "Opened Storage settings" "Gray"
+            Update-GuiStatusBar -JobText "Storage settings opened"
+        } else {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Could not open Storage settings.",
+                "PC Maintenance",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            ) | Out-Null
+        }
+    })
+
+    $btnRestartNow.Add_Click({
+        [void](Invoke-RestartComputerConfirmed)
     })
 
     $btnLogs.Add_Click({
