@@ -495,6 +495,7 @@ function Show-MaintenanceGui {
         $wrap.Size = New-Object System.Drawing.Size(108, 44)
         $wrap.BackColor = $t.Header
         $wrap.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $wrap.Tag = $name
         $header.Controls.Add($wrap)
 
         $ico = New-Object System.Windows.Forms.Label
@@ -504,6 +505,7 @@ function Show-MaintenanceGui {
         $ico.AutoSize = $true
         $ico.Location = New-Object System.Drawing.Point(8, 4)
         $ico.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $ico.Tag = $name
         $wrap.Controls.Add($ico)
 
         $nb = New-Object System.Windows.Forms.Button
@@ -533,12 +535,12 @@ function Show-MaintenanceGui {
         })
         $wrap.Controls.Add($nb)
 
-        $clickNav = {
+        $navClick = {
             param($sender, $e)
-            Set-ActiveNav $name
-        }.GetNewClosure()
-        $wrap.Add_Click($clickNav)
-        $ico.Add_Click($clickNav)
+            Set-ActiveNav ([string]$sender.Tag)
+        }
+        $wrap.Add_Click($navClick)
+        $ico.Add_Click($navClick)
 
         $Script:NavButtons[$name] = $nb
         $Script:NavIcons[$name] = $ico
