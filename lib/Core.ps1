@@ -65,9 +65,13 @@ function Invoke-WithUiWait {
         [scriptblock]$ScriptBlock,
         [string]$Activity = "Working",
         [int]$TimeoutSec = 900,
-        [object[]]$ArgumentList = @()
+        [object[]]$ArgumentList = @(),
+        [switch]$Sta
     )
     $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    if ($Sta) {
+        $rs.ApartmentState = [System.Threading.ApartmentState]::STA
+    }
     $rs.Open()
     $ps = [System.Management.Automation.PowerShell]::Create()
     $ps.Runspace = $rs
@@ -540,12 +544,12 @@ function Invoke-RecycleAndCleanMgr {
 
 function Invoke-WindowsUpdate {
     Write-Step "Windows Updates"
-    Write-Info "Scan runs in the background so the window stays responsive (1-5 min)"
+    Write-Info "Scan runs in the background so the window stays responsive"
     try {
         $have = Get-Module -ListAvailable PSWindowsUpdate -EA SilentlyContinue
         if (-not $have) {
             Write-Info "Installing PSWindowsUpdate module (one-time)..."
-            $installed = Invoke-WithUiWait -Activity "Installing update module" -TimeoutSec 300 -ScriptBlock {
+            $installed = Invoke-WithUiWait -Activity "Installing update module" -TimeoutSec 300 -Sta -ScriptBlock {
                 try {
                     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
                     Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -EA SilentlyContinue | Out-Null
@@ -558,24 +562,43 @@ function Invoke-WindowsUpdate {
             }
             $instText = Get-AsyncResultText $installed
             if ($instText -ne "OK") {
-                Write-Warn "Module install failed - using UsoClient fallback"
-                UsoClient StartInteractiveScan 2>$null
-                Write-Ok "Windows Update scan started (check Settings > Windows Update)"
+                Write-Warn "Module install failed - starting Windows Update scan via UsoClient"
+                Start-WindowsUpdateFallbackScan
                 return
             }
             Write-Ok "PSWindowsUpdate installed"
         }
 
-        Write-Info "Scanning for updates..."
-        $scan = Invoke-WithUiWait -Activity "Scanning Windows Update" -TimeoutSec 600 -ScriptBlock {
-            Import-Module PSWindowsUpdate -EA SilentlyContinue
-            @(Get-WindowsUpdate -MicrosoftUpdate -EA SilentlyContinue | ForEach-Object { $_.Title })
+        Write-Info "Scanning Windows Update (can take several minutes on first run)..."
+        # STA + Windows Update only (no -MicrosoftUpdate) — Microsoft Update catalog often hangs/timeouts
+        $scan = Invoke-WithUiWait -Activity "Scanning Windows Update" -TimeoutSec 1200 -Sta -ScriptBlock {
+            Import-Module PSWindowsUpdate -Force -EA Stop
+            $list = @(Get-WindowsUpdate -WindowsUpdate -ErrorAction Stop)
+            ,@($list | ForEach-Object {
+                if ($_.Title) { [string]$_.Title }
+                elseif ($_.KB) { "KB$($_.KB)" }
+                else { $_.ToString() }
+            })
         }
+
         if ($null -eq $scan) {
-            Write-Warn "Windows Update scan timed out / failed"
+            Write-Warn "Windows Update scan timed out after 20 min - starting Settings scan instead"
+            Start-WindowsUpdateFallbackScan
             return
         }
-        $titles = @($scan | Where-Object { $_ })
+
+        $titles = @()
+        foreach ($item in @($scan)) {
+            if ($item -is [System.Array] -or $item -is [System.Collections.IEnumerable]) {
+                foreach ($t in @($item)) {
+                    if ($t -and "$t".Trim()) { $titles += [string]$t }
+                }
+            } elseif ($item -and "$item".Trim()) {
+                $titles += [string]$item
+            }
+        }
+        $titles = @($titles | Where-Object { $_ } | Select-Object -Unique)
+
         if ($titles.Count -gt 0) {
             Write-Info ("Found {0} update(s). Installing..." -f $titles.Count)
             $n = 0
@@ -583,10 +606,15 @@ function Invoke-WindowsUpdate {
                 $n++
                 Write-Info ("Update {0}/{1}: {2}" -f $n, $titles.Count, $t)
             }
-            $null = Invoke-WithUiWait -Activity "Installing Windows Updates" -TimeoutSec 3600 -ScriptBlock {
-                Import-Module PSWindowsUpdate -EA SilentlyContinue
-                Get-WindowsUpdate -MicrosoftUpdate -AcceptAll -Install -IgnoreReboot -EA SilentlyContinue | Out-Null
+            $install = Invoke-WithUiWait -Activity "Installing Windows Updates" -TimeoutSec 3600 -Sta -ScriptBlock {
+                Import-Module PSWindowsUpdate -Force -EA Stop
+                Get-WindowsUpdate -WindowsUpdate -AcceptAll -Install -IgnoreReboot -ErrorAction Stop | Out-Null
                 "OK"
+            }
+            if ($null -eq $install) {
+                Write-Warn "Install timed out - open Settings > Windows Update to finish"
+                Start-WindowsUpdateFallbackScan
+                return
             }
             Write-Ok "Windows Updates installed (reboot may be required)"
         } else {
@@ -594,6 +622,21 @@ function Invoke-WindowsUpdate {
         }
     } catch {
         Write-Fail "Windows Update: $($_.Exception.Message)"
+        Start-WindowsUpdateFallbackScan
+    }
+}
+
+function Start-WindowsUpdateFallbackScan {
+    try {
+        UsoClient StartInteractiveScan 2>$null
+        Write-Ok "Windows Update scan started in Settings (check Windows Update there)"
+    } catch {
+        try {
+            Start-Process "ms-settings:windowsupdate" -EA SilentlyContinue
+            Write-Ok "Opened Windows Update settings"
+        } catch {
+            Write-Warn "Could not start Windows Update fallback"
+        }
     }
 }
 
