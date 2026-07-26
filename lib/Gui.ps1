@@ -323,7 +323,8 @@ function Set-GuiBusy([bool]$Busy) {
     $runBtns = @(
         'BtnWeekly','BtnCleanup','BtnUpdates','BtnRepair','BtnGamingOpt','BtnRefreshDevice',
         'BtnFixPower','BtnCopyRamTip','BtnRestartNow','BtnOpenStorage',
-        'BtnDiscordOff','BtnRefreshGame','BtnRefreshHome','BtnAmd','BtnNv','BtnRestoreOnly'
+        'BtnDiscordOff','BtnRefreshGame','BtnRefreshHome','BtnAmd','BtnNv','BtnRestoreOnly',
+        'BtnCheckUpdate'
     )
     foreach ($n in $runBtns) {
         $b = $Script:GuiControls.$n
@@ -332,35 +333,128 @@ function Set-GuiBusy([bool]$Busy) {
     foreach ($key in $Script:NavButtons.Keys) {
         $Script:NavButtons[$key].Enabled = -not $Busy
     }
+    $stop = $null
+    if ($Script:GuiControls -and $Script:GuiControls.BtnStop) {
+        $stop = $Script:GuiControls.BtnStop
+    }
+    if ($stop) {
+        $stop.Enabled = $Busy
+        $stop.Visible = $true
+    }
     if (-not $Busy) { $Script:LastJobText = "Ready" }
     Update-GuiStatusBar
+}
+
+function Drain-UiEventQueue {
+    if (-not $Script:UiShare -or -not $Script:UiShare.Queue) { return }
+    $item = $null
+    while ($Script:UiShare.Queue.TryDequeue([ref]$item)) {
+        switch ($item.Type) {
+            'Log' { 
+                $box = Get-UiControl Log
+                if (-not $box) { break }
+                $ColorName = $item.Color
+                $color = switch ($ColorName) {
+                    'Green'  { [System.Drawing.Color]::FromArgb(80, 200, 120) }
+                    'Yellow' { [System.Drawing.Color]::FromArgb(230, 180, 60) }
+                    'Red'    { [System.Drawing.Color]::FromArgb(230, 90, 90) }
+                    'Cyan'   { [System.Drawing.Color]::FromArgb(80, 190, 220) }
+                    'Gray'   { [System.Drawing.Color]::FromArgb(140, 150, 160) }
+                    default  { [System.Drawing.Color]::FromArgb(220, 225, 230) }
+                }
+                $stamp = Get-Date -Format "HH:mm:ss"
+                $box.SelectionStart = $box.TextLength
+                $box.SelectionLength = 0
+                $box.SelectionColor = $color
+                $box.AppendText("[$stamp] $($item.Msg)`r`n")
+                $box.ScrollToCaret()
+            }
+            'Status' { 
+                $lbl = Get-UiControl Status
+                if ($lbl) { $lbl.Text = [string]$item.Text }
+                Update-GuiStatusBar -JobText ([string]$item.Text)
+            }
+            'Progress' { 
+                # apply locally without re-enqueue
+                $pct = [math]::Max(0, [math]::Min(100, [int]$item.Value))
+                $Script:LastProgressPct = $pct
+                $fill = Get-UiControl ProgressFill
+                $track = Get-UiControl ProgressTrack
+                if ($fill -and $track) {
+                    $fill.Width = [math]::Max(0, [int](($track.ClientSize.Width * $pct) / 100.0))
+                }
+            }
+            'Done' {
+                Update-GuiHomeSummary
+                Update-GuiDevicePanel
+                Update-GuiGamingStatus
+                Set-GuiBusy $false
+                Save-GuiSettings $Script:GuiControls
+            }
+            'Error' {
+                Write-Fail ([string]$item.Msg)
+                Set-UiStatusText "Failed"
+                [System.Windows.Forms.MessageBox]::Show(
+                    [string]$item.Msg,
+                    "PC Maintenance",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Error
+                ) | Out-Null
+                Set-GuiBusy $false
+            }
+        }
+    }
 }
 
 function Invoke-GuiAction {
     param([scriptblock]$Action, [string]$Title = "Working")
     if ($Script:GuiBusy) { return }
+    if (-not $Action -or $Action -isnot [scriptblock]) {
+        throw "Invoke-GuiAction requires a scriptblock Action."
+    }
+
+    $Script:CancelRequested = $false
+    if ($Script:UiShare) { $Script:UiShare['CancelRequested'] = $false }
+    Clear-TrackedProcesses
     Set-GuiBusy $true
     Set-UiProgressValue 0
     Set-UiStatusText $Title
     Update-GuiStatusBar -JobText $Title
+    Ensure-SessionLog
+    # Paint Stop/disabled buttons before long work (DoEvents keeps Cancel responsive later)
+    Pump-Ui
+
     try {
         & $Action
-        Update-GuiHomeSummary
-        Update-GuiDevicePanel
-        Update-GuiGamingStatus
-        Set-UiStatusText ("Done - {0}" -f (Get-Elapsed))
-        Update-GuiStatusBar -JobText ("Done - {0}" -f (Get-Elapsed))
+        if (-not (Test-CancelRequested)) {
+            Update-GuiHomeSummary
+            Update-GuiDevicePanel
+            Update-GuiGamingStatus
+            Set-UiStatusText ("Done - {0}" -f (Get-Elapsed))
+            Update-GuiStatusBar -JobText ("Done - {0}" -f (Get-Elapsed))
+        } else {
+            Set-UiStatusText "Cancelled"
+            Update-GuiStatusBar -JobText "Cancelled"
+        }
+        Save-GuiSettings $Script:GuiControls
     } catch {
-        Write-Fail $_.Exception.Message
-        Set-UiStatusText "Failed"
-        [System.Windows.Forms.MessageBox]::Show(
-            $_.Exception.Message,
-            "PC Maintenance",
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Error
-        ) | Out-Null
+        if ($_.Exception.Message -match 'Cancelled') {
+            Write-Warn "Cancelled by user"
+            Set-UiStatusText "Cancelled"
+        } else {
+            Write-Fail $_.Exception.Message
+            Set-UiStatusText "Failed"
+            [System.Windows.Forms.MessageBox]::Show(
+                $_.Exception.Message,
+                "PC Maintenance",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Error
+            ) | Out-Null
+        }
     } finally {
+        Clear-TrackedProcesses
         Set-GuiBusy $false
+        Pump-Ui
     }
 }
 
@@ -596,10 +690,13 @@ function Show-MaintenanceGui {
     $btnCluster.BackColor = $t.Panel
     $logBottom.Controls.Add($btnCluster)
 
-    $btnLogs = New-PremiumButton "View Full Log" (New-Object System.Drawing.Point(8, 12)) (New-Object System.Drawing.Size(120, 32)) "Muted"
-    $btnCli = New-PremiumButton "CLI" (New-Object System.Drawing.Point(136, 12)) (New-Object System.Drawing.Size(44, 32)) "Muted"
-    $btnQuit = New-PremiumButton "Quit" (New-Object System.Drawing.Point(186, 12)) (New-Object System.Drawing.Size(46, 32)) "Danger"
-    $btnCluster.Controls.AddRange(@($btnLogs, $btnCli, $btnQuit))
+    $btnLogs = New-PremiumButton "View Full Log" (New-Object System.Drawing.Point(8, 12)) (New-Object System.Drawing.Size(100, 32)) "Muted"
+    $btnStop = New-PremiumButton "Stop" (New-Object System.Drawing.Point(112, 12)) (New-Object System.Drawing.Size(52, 32)) "Danger"
+    $btnStop.Enabled = $false
+    $btnCli = New-PremiumButton "CLI" (New-Object System.Drawing.Point(168, 12)) (New-Object System.Drawing.Size(44, 32)) "Muted"
+    $btnQuit = New-PremiumButton "Quit" (New-Object System.Drawing.Point(216, 12)) (New-Object System.Drawing.Size(46, 32)) "Danger"
+    $btnCluster.Width = 270
+    $btnCluster.Controls.AddRange(@($btnLogs, $btnStop, $btnCli, $btnQuit))
 
     $progArea = New-Object System.Windows.Forms.Panel
     $progArea.Dock = "Fill"
@@ -793,7 +890,7 @@ function Show-MaintenanceGui {
     $pageClean.Controls.Add($cardClean)
 
     $cleanHint = New-Object System.Windows.Forms.Label
-    $cleanHint.Text = "Safe free-space cleanup. Launcher caches need confirmation and never uninstall games."
+    $cleanHint.Text = "Safe free-space cleanup. Use Preview sizes first. Launcher caches need confirmation and never uninstall games."
     $cleanHint.ForeColor = $t.Muted
     $cleanHint.Location = New-Object System.Drawing.Point(20, 48)
     $cleanHint.Size = New-Object System.Drawing.Size(900, 28)
@@ -820,17 +917,20 @@ function Show-MaintenanceGui {
 
     $chkCleanShader = New-PremiumCheck "GPU shader caches" (New-Object System.Drawing.Point(20, 136)) $true
     $chkSteam = New-PremiumCheck "Steam downloading cache" (New-Object System.Drawing.Point(20, 172)) $false
-    $chkEpic = New-PremiumCheck "Epic launcher cache/logs" (New-Object System.Drawing.Point(20, 208)) $false
+    $chkEpic = New-PremiumCheck "Epic cache / logs / staging" (New-Object System.Drawing.Point(20, 208)) $false
     $chkRiot = New-PremiumCheck "Riot Client cache/logs" (New-Object System.Drawing.Point(20, 244)) $false
     $cardClean.Controls.AddRange(@($chkCleanShader, $chkSteam, $chkEpic, $chkRiot))
 
+    $btnPreview = New-PremiumButton "Preview sizes" (New-Object System.Drawing.Point(20, 280)) (New-Object System.Drawing.Size(140, 44)) "Ghost"
     $btnCleanup = New-PremiumButton "Run Cleanup" (New-Object System.Drawing.Point(20, 280)) (New-Object System.Drawing.Size(200, 44)) "Primary"
     $btnCleanup.Anchor = "Bottom,Right"
-    $cardClean.Controls.Add($btnCleanup)
+    $btnPreview.Anchor = "Bottom,Left"
+    $cardClean.Controls.AddRange(@($btnPreview, $btnCleanup))
     $cardClean.Add_Resize({
         param($sender, $e)
         $btnCleanup.Left = $sender.ClientSize.Width - 220
         $btnCleanup.Top = $sender.ClientSize.Height - 60
+        $btnPreview.Top = $sender.ClientSize.Height - 60
         $cleanHint.Width = $sender.ClientSize.Width - 40
     })
 
@@ -1004,13 +1104,14 @@ function Show-MaintenanceGui {
     $btnRefreshDevice = New-PremiumButton "Refresh" (New-Object System.Drawing.Point(24, 52)) (New-Object System.Drawing.Size(280, 40)) "Ghost"
     $btnCopyRamTip = New-PremiumButton "Copy RAM upgrade tip" (New-Object System.Drawing.Point(24, 104)) (New-Object System.Drawing.Size(280, 40)) "Ghost"
     $btnOpenStorage = New-PremiumButton "Open Storage settings" (New-Object System.Drawing.Point(24, 156)) (New-Object System.Drawing.Size(280, 40)) "Muted"
-    $btnRestartNow = New-PremiumButton "Restart PC now" (New-Object System.Drawing.Point(24, 208)) (New-Object System.Drawing.Size(280, 40)) "Danger"
-    $cardDevAct.Controls.AddRange(@($btnRefreshDevice, $btnCopyRamTip, $btnOpenStorage, $btnRestartNow))
+    $btnCheckUpdate = New-PremiumButton "Check for app update" (New-Object System.Drawing.Point(24, 208)) (New-Object System.Drawing.Size(280, 40)) "Ghost"
+    $btnRestartNow = New-PremiumButton "Restart PC now" (New-Object System.Drawing.Point(24, 260)) (New-Object System.Drawing.Size(280, 40)) "Danger"
+    $cardDevAct.Controls.AddRange(@($btnRefreshDevice, $btnCopyRamTip, $btnOpenStorage, $btnCheckUpdate, $btnRestartNow))
 
     $devTip = New-Object System.Windows.Forms.Label
     $devTip.Text = "Gaming optimize and power plan live on the Gaming tab."
     $devTip.ForeColor = $t.Muted
-    $devTip.Location = New-Object System.Drawing.Point(24, 270)
+    $devTip.Location = New-Object System.Drawing.Point(24, 320)
     $devTip.Size = New-Object System.Drawing.Size(280, 40)
     $devTip.Anchor = "Bottom,Left,Right"
     $cardDevAct.Controls.Add($devTip)
@@ -1018,7 +1119,7 @@ function Show-MaintenanceGui {
     $cardDevAct.Add_Resize({
         param($sender, $e)
         $w = [math]::Max(200, $sender.ClientSize.Width - 48)
-        foreach ($b in @($btnRefreshDevice, $btnCopyRamTip, $btnOpenStorage, $btnRestartNow)) {
+        foreach ($b in @($btnRefreshDevice, $btnCopyRamTip, $btnOpenStorage, $btnCheckUpdate, $btnRestartNow)) {
             $b.Width = $w
         }
         $devTip.Width = $w
@@ -1058,6 +1159,7 @@ function Show-MaintenanceGui {
         ChkRepRestore   = $chkRepRestore
         BtnWeekly       = $btnWeekly
         BtnCleanup      = $btnCleanup
+        BtnPreview      = $btnPreview
         BtnUpdates      = $btnUpdates
         BtnRepair       = $btnRepair
         BtnGamingOpt    = $btnGamingOpt
@@ -1072,6 +1174,8 @@ function Show-MaintenanceGui {
         BtnAmd          = $btnAmd
         BtnNv           = $btnNv
         BtnRestoreOnly  = $btnRestoreOnly
+        BtnStop         = $btnStop
+        BtnCheckUpdate  = $btnCheckUpdate
     }
 
     $Script:Ui = [pscustomobject]@{
@@ -1084,23 +1188,61 @@ function Show-MaintenanceGui {
         Free          = $freeLbl
     }
 
+    $Script:UiShare = [hashtable]::Synchronized(@{
+        CancelRequested = $false
+        Queue           = $null
+    })
+
+    $saved = Load-GuiSettings
+    Apply-GuiSettings -Controls $Script:GuiControls -Settings $saved
+
+    Ensure-SessionLog
+
     Set-ActiveNav "Home"
     Update-GuiHomeSummary
     Update-GuiDevicePanel
     Update-GuiGamingStatus
     Update-GuiStatusBar -JobText "Ready"
-    Append-UiLog "PC Maintenance Kit v5.1 ready" "Cyan"
+    Append-UiLog ("PC Maintenance Kit v{0} ready" -f $Script:AppVersion) "Cyan"
+
+    $uiTimer = New-Object System.Windows.Forms.Timer
+    $uiTimer.Interval = 100
+    $uiTimer.Add_Tick({ Drain-UiEventQueue; Pump-Ui })
+    $uiTimer.Start()
+    $form.Add_FormClosed({
+        try { $uiTimer.Stop(); $uiTimer.Dispose() } catch { }
+        try { Save-GuiSettings $Script:GuiControls } catch { }
+    })
+
+    if ($saved.CheckUpdatesOnStart) {
+        $form.Add_Shown({
+            try {
+                $check = Test-AppUpdateAvailable -Silent
+                if ($check -and $check.Status -eq 'UpdateAvailable') {
+                    Show-UpdateAvailableDialog $check.Release
+                }
+            } catch { }
+        })
+    }
 
     $btnClearLog.Add_Click({
         $box = Get-UiControl Log
         if ($box) { $box.Clear() }
     })
 
+    $btnStop.Add_Click({
+        Request-MaintenanceCancel
+        Append-UiLog "Stop requested..." "Yellow"
+        Update-GuiStatusBar -JobText "Cancelling..."
+    })
+
     $btnWeekly.Add_Click({
+        Save-GuiSettings $Script:GuiControls
         Invoke-GuiAction -Title "Weekly Full" -Action {
             $logBox = Get-UiControl Log
             if ($logBox) { $logBox.Clear() }
             Append-UiLog "Weekly Full starting..." "Cyan"
+            Reset-MaintenanceFlags
             $Script:DoCleanup = $true
             $Script:DoRestorePoint = [bool]$Script:GuiControls.ChkHomeRestore.Checked
             $Script:DoShaderCleanup = [bool]$Script:GuiControls.ChkHomeShader.Checked
@@ -1111,12 +1253,6 @@ function Show-MaintenanceGui {
             $Script:DoRepair = $false
             $Script:TempOlderThanDays = 2
             [void](Invoke-MaintenanceRun)
-            [System.Windows.Forms.MessageBox]::Show(
-                "Weekly run finished.`nLogs: Desktop\PC-Maintenance-Logs",
-                "PC Maintenance",
-                [System.Windows.Forms.MessageBoxButtons]::OK,
-                [System.Windows.Forms.MessageBoxIcon]::Information
-            ) | Out-Null
         }
     })
 
@@ -1126,7 +1262,23 @@ function Show-MaintenanceGui {
         Update-GuiStatusBar -JobText "Home refreshed"
     })
 
+    $btnPreview.Add_Click({
+        if ($Script:GuiBusy) { return }
+        Invoke-GuiAction -Title "Preview cleanup" -Action {
+            Append-UiLog "Measuring cleanup sizes..." "Cyan"
+            $preview = Get-CleanupPreview `
+                -TempOlderThanDays ([int]$Script:GuiControls.DaysNum.Value) `
+                -Shaders ([bool]$Script:GuiControls.ChkCleanShader.Checked) `
+                -Steam ([bool]$Script:GuiControls.ChkSteam.Checked) `
+                -Epic ([bool]$Script:GuiControls.ChkEpic.Checked) `
+                -Riot ([bool]$Script:GuiControls.ChkRiot.Checked)
+            Append-UiLog ("Preview total ~ {0} across {1} path(s)" -f $preview.TotalText, @($preview.Rows).Count) "Cyan"
+            [void](Show-CleanupPreviewDialog -Preview $preview)
+        }
+    })
+
     $btnCleanup.Add_Click({
+        Save-GuiSettings $Script:GuiControls
         $needConfirm = $Script:GuiControls.ChkSteam.Checked -or $Script:GuiControls.ChkEpic.Checked -or $Script:GuiControls.ChkRiot.Checked
         if ($needConfirm) {
             $r = [System.Windows.Forms.MessageBox]::Show(
@@ -1137,35 +1289,65 @@ function Show-MaintenanceGui {
             )
             if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
         }
+
+        Append-UiLog "Building cleanup preview..." "Gray"
+        $preview = Get-CleanupPreview `
+            -TempOlderThanDays ([int]$Script:GuiControls.DaysNum.Value) `
+            -Shaders ([bool]$Script:GuiControls.ChkCleanShader.Checked) `
+            -Steam ([bool]$Script:GuiControls.ChkSteam.Checked) `
+            -Epic ([bool]$Script:GuiControls.ChkEpic.Checked) `
+            -Riot ([bool]$Script:GuiControls.ChkRiot.Checked)
+        $prevResult = Show-CleanupPreviewDialog -Preview $preview
+        if ($prevResult -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
         Invoke-GuiAction -Title "Cleanup" -Action {
             $logBox = Get-UiControl Log
             if ($logBox) { $logBox.Clear() }
+            Reset-MaintenanceFlags
+            $Script:DoWinUpdate = $false
+            $Script:DoWinget = $false
+            $Script:DoRepair = $false
+            $Script:DoAmd = $false
+            $Script:DoGamingOptimize = $false
+            Ensure-SessionLog
             Init-Log
             $Script:Report.Clear()
             $Script:RunStart = Get-Date
+            $Script:StartFree = Get-CFreeGB
             $Script:TempOlderThanDays = [int]$Script:GuiControls.DaysNum.Value
             $Script:TotalSteps = 3
             if ($Script:GuiControls.ChkCleanShader.Checked) { $Script:TotalSteps++ }
             if ($Script:GuiControls.ChkSteam.Checked -or $Script:GuiControls.ChkEpic.Checked -or $Script:GuiControls.ChkRiot.Checked) { $Script:TotalSteps++ }
             $Script:CurrentStep = 0
-            Invoke-TempCleanup
-            Invoke-BrowserCacheCleanup
-            Invoke-RecycleAndCleanMgr
-            if ($Script:GuiControls.ChkCleanShader.Checked) { Invoke-ShaderCacheCleanup }
-            if ($Script:GuiControls.ChkSteam.Checked -or $Script:GuiControls.ChkEpic.Checked -or $Script:GuiControls.ChkRiot.Checked) {
-                $doSteam = [bool]$Script:GuiControls.ChkSteam.Checked
-                $doEpic  = [bool]$Script:GuiControls.ChkEpic.Checked
-                $doRiot  = [bool]$Script:GuiControls.ChkRiot.Checked
-                Invoke-LauncherCacheCleanup -Steam:$doSteam -Epic:$doEpic -Riot:$doRiot
+            try {
+                Invoke-TempCleanup
+                Assert-NotCancelled
+                Invoke-BrowserCacheCleanup
+                Assert-NotCancelled
+                Invoke-RecycleAndCleanMgr
+                if ($Script:GuiControls.ChkCleanShader.Checked) { Assert-NotCancelled; Invoke-ShaderCacheCleanup }
+                if ($Script:GuiControls.ChkSteam.Checked -or $Script:GuiControls.ChkEpic.Checked -or $Script:GuiControls.ChkRiot.Checked) {
+                    Assert-NotCancelled
+                    $doSteam = [bool]$Script:GuiControls.ChkSteam.Checked
+                    $doEpic  = [bool]$Script:GuiControls.ChkEpic.Checked
+                    $doRiot  = [bool]$Script:GuiControls.ChkRiot.Checked
+                    Invoke-LauncherCacheCleanup -Steam:$doSteam -Epic:$doEpic -Riot:$doRiot
+                }
+                Append-UiLog "Cleanup finished." "Green"
+                Show-RunSummaryDialog -Title "Cleanup summary"
+            } catch {
+                if ($_.Exception.Message -match 'Cancelled') { Write-Warn "Cleanup cancelled" }
+                else { throw }
             }
-            Append-UiLog "Cleanup finished." "Green"
         }
     })
 
     $btnUpdates.Add_Click({
+        Save-GuiSettings $Script:GuiControls
         Invoke-GuiAction -Title "Updates" -Action {
             $logBox = Get-UiControl Log
             if ($logBox) { $logBox.Clear() }
+            Reset-MaintenanceFlags
             $Script:DoCleanup = $false
             $Script:DoShaderCleanup = $false
             $Script:DoGamingOptimize = $false
@@ -1184,6 +1366,7 @@ function Show-MaintenanceGui {
 
     $btnAmd.Add_Click({
         Invoke-GuiAction -Title "AMD" -Action {
+            Ensure-SessionLog
             Init-Log
             $Script:Report.Clear()
             $Script:TotalSteps = 1
@@ -1194,6 +1377,7 @@ function Show-MaintenanceGui {
 
     $btnNv.Add_Click({
         Invoke-GuiAction -Title "NVIDIA" -Action {
+            Ensure-SessionLog
             Init-Log
             $Script:Report.Clear()
             $Script:TotalSteps = 1
@@ -1207,6 +1391,7 @@ function Show-MaintenanceGui {
         Invoke-GuiAction -Title "Gaming optimize" -Action {
             $logBox = Get-UiControl Log
             if ($logBox) { $logBox.Clear() }
+            Ensure-SessionLog
             Init-Log
             $Script:Report.Clear()
             $Script:RunStart = Get-Date
@@ -1215,11 +1400,13 @@ function Show-MaintenanceGui {
             Invoke-GamingOptimize
             Invoke-GamingChecks
             Update-GuiGamingStatus
+            Show-RunSummaryDialog -Title "Gaming optimize summary"
         }
     })
 
     $btnFixPower.Add_Click({
         Invoke-GuiAction -Title "Fix power plan" -Action {
+            Ensure-SessionLog
             Init-Log
             $Script:Report.Clear()
             $Script:TotalSteps = 1
@@ -1259,8 +1446,9 @@ function Show-MaintenanceGui {
     })
 
     $btnRepair.Add_Click({
+        Save-GuiSettings $Script:GuiControls
         $r = [System.Windows.Forms.MessageBox]::Show(
-            "Run DISM + SFC?`nThis can take 10-30+ minutes. Do not close the app.",
+            "Run DISM + SFC?`nThis can take 10-30+ minutes. Do not close the app.`nYou can press Stop to abort.",
             "Confirm repair",
             [System.Windows.Forms.MessageBoxButtons]::YesNo,
             [System.Windows.Forms.MessageBoxIcon]::Warning
@@ -1269,6 +1457,7 @@ function Show-MaintenanceGui {
         Invoke-GuiAction -Title "Repair" -Action {
             $logBox = Get-UiControl Log
             if ($logBox) { $logBox.Clear() }
+            Reset-MaintenanceFlags
             $Script:DoCleanup = $false
             $Script:DoShaderCleanup = $false
             $Script:DoGamingOptimize = $false
@@ -1283,6 +1472,7 @@ function Show-MaintenanceGui {
 
     $btnRestoreOnly.Add_Click({
         Invoke-GuiAction -Title "Restore point" -Action {
+            Ensure-SessionLog
             Init-Log
             $Script:Report.Clear()
             $Script:RunStart = Get-Date
@@ -1297,11 +1487,39 @@ function Show-MaintenanceGui {
         Update-GuiHomeSummary
         Update-GuiStatusBar -JobText "Device refreshed"
         Invoke-GuiAction -Title "Device report" -Action {
+            Ensure-SessionLog
             Init-Log
             $Script:Report.Clear()
             $Script:TotalSteps = 1
             $Script:CurrentStep = 0
             Invoke-DeviceHealthReport
+        }
+    })
+
+    $btnCheckUpdate.Add_Click({
+        Invoke-GuiAction -Title "Update check" -Action {
+            Append-UiLog "Checking GitHub releases..." "Cyan"
+            $check = Test-AppUpdateAvailable
+            if ($check.Status -eq 'UpdateAvailable') {
+                Append-UiLog ("Update available: {0}" -f $check.Release.Tag) "Yellow"
+                Show-UpdateAvailableDialog $check.Release
+            } elseif ($check.Status -eq 'UpToDate') {
+                Append-UiLog ("Up to date (v{0})" -f $Script:AppVersion) "Green"
+                [System.Windows.Forms.MessageBox]::Show(
+                    ("You are on v{0}.`nGitHub latest release: {1}`nYou are up to date." -f $Script:AppVersion, $check.Release.Tag),
+                    "PC Maintenance Kit",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Information
+                ) | Out-Null
+            } else {
+                Append-UiLog "No GitHub release published yet (or offline)" "Yellow"
+                [System.Windows.Forms.MessageBox]::Show(
+                    ("Could not find a GitHub release to compare.`n`nThis PC: v{0}`nRepo: {1}`n`nPublish a Release on GitHub for update checks to work." -f $Script:AppVersion, $Script:GitHubRepo),
+                    "PC Maintenance Kit",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Warning
+                ) | Out-Null
+            }
         }
     })
 
@@ -1345,17 +1563,27 @@ function Show-MaintenanceGui {
     })
 
     $btnLogs.Add_Click({
-        $dir = Join-Path $env:USERPROFILE "Desktop\PC-Maintenance-Logs"
-        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $dir = Get-LogsDirectory
         Start-Process explorer.exe $dir
     })
 
     $btnCli.Add_Click({
-        $scriptPath = Join-Path $Script:AppRoot "PC-Maintenance.ps1"
-        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Mode Cli"
+        try {
+            Start-ElevatedCli
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show(
+                $_.Exception.Message,
+                "PC Maintenance",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            ) | Out-Null
+        }
     })
 
-    $btnQuit.Add_Click({ $form.Close() })
+    $btnQuit.Add_Click({
+        Save-GuiSettings $Script:GuiControls
+        $form.Close()
+    })
 
     [void]$form.ShowDialog()
 }

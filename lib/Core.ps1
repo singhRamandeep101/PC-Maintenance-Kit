@@ -3,13 +3,12 @@ $Script:LogFile = $null
 $Script:StartFree = 0
 $Script:EndFree = 0
 $Script:DoCleanup = $true
-$Script:DoUpdates = $true
-$Script:DoWinUpdate = $true
-$Script:DoWinget = $true
+$Script:DoWinUpdate = $false
+$Script:DoWinget = $false
 $Script:DoRepair = $false
 $Script:DoRestorePoint = $true
-$Script:DoAmd = $true
-$Script:DoShaderCleanup = $false
+$Script:DoAmd = $false
+$Script:DoShaderCleanup = $true
 $Script:DoGamingOptimize = $true
 $Script:TotalSteps = 0
 $Script:CurrentStep = 0
@@ -17,9 +16,73 @@ $Script:RunStart = Get-Date
 $Script:StepNames = [System.Collections.Generic.List[string]]::new()
 $Script:TempOlderThanDays = 2
 $Script:Ui = $null
-$Script:CancelRequested = $false
 $Script:LastPumpUtc = [datetime]::MinValue
 $Script:LastProgressPct = 0
+$Script:CancelRequested = $false
+$Script:TrackedProcesses = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
+$Script:UiShare = $null
+$Script:BgPowerShell = $null
+$Script:SkipWingetConfirm = $false
+
+function Reset-MaintenanceFlags {
+    # Safe weekly defaults — callers override what they need
+    $Script:DoCleanup = $true
+    $Script:DoWinUpdate = $false
+    $Script:DoWinget = $false
+    $Script:DoRepair = $false
+    $Script:DoRestorePoint = $true
+    $Script:DoAmd = $false
+    $Script:DoShaderCleanup = $true
+    $Script:DoGamingOptimize = $true
+    $Script:TempOlderThanDays = 2
+}
+
+function Test-CancelRequested {
+    if ($Script:UiShare -and $null -ne $Script:UiShare['CancelRequested']) {
+        return [bool]$Script:UiShare['CancelRequested']
+    }
+    return [bool]$Script:CancelRequested
+}
+
+function Request-MaintenanceCancel {
+    $Script:CancelRequested = $true
+    if ($Script:UiShare) { $Script:UiShare['CancelRequested'] = $true }
+    Write-Warn "Cancel requested - stopping after current step..."
+    foreach ($p in @($Script:TrackedProcesses)) {
+        try {
+            if ($p -and -not $p.HasExited) { $p.Kill() }
+        } catch { }
+    }
+    if ($Script:BgPowerShell) {
+        try { $Script:BgPowerShell.Stop() } catch { }
+    }
+}
+
+function Assert-NotCancelled {
+    if (Test-CancelRequested) {
+        throw "Cancelled by user."
+    }
+}
+
+function Register-TrackedProcess {
+    param([System.Diagnostics.Process]$Process)
+    if ($Process) {
+        try { [void]$Script:TrackedProcesses.Add($Process) } catch { }
+    }
+}
+
+function Clear-TrackedProcesses {
+    try { $Script:TrackedProcesses.Clear() } catch { }
+}
+
+function Enqueue-UiEvent {
+    param([hashtable]$Event)
+    if ($Script:UiShare -and $Script:UiShare.Queue) {
+        $Script:UiShare.Queue.Enqueue($Event)
+        return $true
+    }
+    return $false
+}
 
 function Pump-Ui {
     $form = Get-UiControl Form
@@ -41,6 +104,7 @@ function Get-UiControl([string]$Name) {
 }
 
 function Set-UiProgressValue([int]$Value) {
+    if (Enqueue-UiEvent @{ Type = 'Progress'; Value = $Value }) { return }
     $pct = [math]::Max(0, [math]::Min(100, $Value))
     $Script:LastProgressPct = $pct
     $bar = Get-UiControl Progress
@@ -56,6 +120,7 @@ function Set-UiProgressValue([int]$Value) {
 }
 
 function Set-UiStatusText([string]$Text) {
+    if (Enqueue-UiEvent @{ Type = 'Status'; Text = $Text }) { return }
     $lbl = Get-UiControl Status
     if ($lbl) { $lbl.Text = $Text }
 }
@@ -68,6 +133,7 @@ function Invoke-WithUiWait {
         [object[]]$ArgumentList = @(),
         [switch]$Sta
     )
+    Assert-NotCancelled
     $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
     if ($Sta) {
         $rs.ApartmentState = [System.Threading.ApartmentState]::STA
@@ -75,6 +141,7 @@ function Invoke-WithUiWait {
     $rs.Open()
     $ps = [System.Management.Automation.PowerShell]::Create()
     $ps.Runspace = $rs
+    $Script:BgPowerShell = $ps
     [void]$ps.AddScript($ScriptBlock)
     foreach ($a in $ArgumentList) {
         [void]$ps.AddArgument($a)
@@ -85,6 +152,11 @@ function Invoke-WithUiWait {
     $i = 0
     try {
         while (-not $handle.IsCompleted) {
+            if (Test-CancelRequested) {
+                try { $ps.Stop() } catch { }
+                Write-Warn "$Activity cancelled"
+                return $null
+            }
             if ($sw.Elapsed.TotalSeconds -ge $TimeoutSec) {
                 try { $ps.Stop() } catch { }
                 Write-Warn "$Activity timed out after ${TimeoutSec}s"
@@ -99,6 +171,10 @@ function Invoke-WithUiWait {
             $i++
         }
         Write-Host ""
+        if (Test-CancelRequested) {
+            Write-Warn "$Activity cancelled"
+            return $null
+        }
         $result = $ps.EndInvoke($handle)
         if ($ps.HadErrors) {
             foreach ($e in $ps.Streams.Error) {
@@ -107,6 +183,7 @@ function Invoke-WithUiWait {
         }
         return $result
     } finally {
+        $Script:BgPowerShell = $null
         $ps.Dispose()
         $rs.Dispose()
     }
@@ -131,12 +208,13 @@ function Ensure-Admin {
     if ($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { return }
 
     if (-not $ScriptPath) { $ScriptPath = $PSCommandPath }
-    if (-not $ScriptPath -or -not (Test-Path -LiteralPath $ScriptPath)) {
+    if (-not $ScriptPath -or -not (Test-PathSafe $ScriptPath)) {
         throw "Cannot elevate: script path not found."
     }
 
     $ps = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-    $hideGui = ($RelaunchArgs -match '-Mode\s+Gui')
+    # Hide console for Gui elevate; keep visible for Cli / one-shot modes
+    $hideGui = ($RelaunchArgs -match '-Mode\s+Gui') -or ($RelaunchArgs -notmatch '-Mode\s+')
     $arguments = "-NoProfile -ExecutionPolicy Bypass -STA"
     if ($hideGui) { $arguments += " -WindowStyle Hidden" }
     $arguments += " -File `"$ScriptPath`""
@@ -158,11 +236,23 @@ function Ensure-Admin {
 }
 
 function Init-Log {
+    param([switch]$ForceNew)
     $dir = Join-Path $env:USERPROFILE "Desktop\PC-Maintenance-Logs"
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    if (-not $ForceNew -and $Script:LogFile -and (Test-PathSafe $Script:LogFile)) {
+        Write-Log "---- new action $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ----"
+        return
+    }
     $stamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
     $Script:LogFile = Join-Path $dir "maintenance_$stamp.log"
-    "PC Maintenance Kit v5 started: $(Get-Date)" | Out-File $Script:LogFile -Encoding UTF8
+    $ver = if ($Script:AppVersion) { $Script:AppVersion } else { "5.1" }
+    "PC Maintenance Kit v$ver started: $(Get-Date)" | Out-File $Script:LogFile -Encoding UTF8
+}
+
+function Ensure-SessionLog {
+    if (-not $Script:LogFile -or -not (Test-PathSafe $Script:LogFile)) {
+        Init-Log -ForceNew
+    }
 }
 
 function Write-Log([string]$msg) {
@@ -198,6 +288,7 @@ function Update-UiProgress {
 
 function Append-UiLog {
     param([string]$msg, [string]$ColorName = "White")
+    if (Enqueue-UiEvent @{ Type = 'Log'; Msg = $msg; Color = $ColorName }) { return }
     $box = Get-UiControl Log
     if (-not $box) { return }
     $color = switch ($ColorName) {
@@ -219,6 +310,7 @@ function Append-UiLog {
 }
 
 function Write-Step([string]$msg) {
+    Assert-NotCancelled
     $Script:CurrentStep++
     Write-Host ""
     Write-Host "=== [$($Script:CurrentStep)/$($Script:TotalSteps)] $msg ===" -ForegroundColor Cyan
@@ -275,10 +367,17 @@ function Wait-WithSpinner {
         [int]$TimeoutSec = 120,
         [string]$Activity = "Working"
     )
+    Register-TrackedProcess $Process
     $spin = @('|','/','-','\')
     $i = 0
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while (-not $Process.HasExited) {
+        if (Test-CancelRequested) {
+            Write-Host ""
+            try { $Process.Kill() } catch { }
+            Write-Warn "$Activity cancelled"
+            return $false
+        }
         if ($sw.Elapsed.TotalSeconds -ge $TimeoutSec) {
             Write-Host ""
             try { $Process.Kill() } catch { }
@@ -288,7 +387,7 @@ function Wait-WithSpinner {
         $ch = $spin[$i % 4]
         $sec = [int]$sw.Elapsed.TotalSeconds
         Write-Host -NoNewline ("`r  [{0}] {1}... {2}s / {3}s max   " -f $ch, $Activity, $sec, $TimeoutSec) -ForegroundColor DarkYellow
-        if ($Script:Ui) {
+        if ($Script:Ui -or $Script:UiShare) {
             Set-UiStatusText -Text ("[{0}] {1}... {2}s / {3}s" -f $ch, $Activity, $sec, $TimeoutSec)
         }
         Pump-Ui
@@ -307,27 +406,27 @@ function Apply-ModeFlags {
     )
     switch ($ModeName) {
         'Full' {
-            $Script:DoCleanup=$true; $Script:DoUpdates=$true; $Script:DoWinUpdate=$false; $Script:DoWinget=$false
+            $Script:DoCleanup=$true; $Script:DoWinUpdate=$false; $Script:DoWinget=$false
             $Script:DoRepair=$false; $Script:DoRestorePoint=$true; $Script:DoAmd=$false
             $Script:DoShaderCleanup=$true; $Script:DoGamingOptimize=$true
         }
         'CleanupOnly' {
-            $Script:DoCleanup=$true; $Script:DoUpdates=$false; $Script:DoWinUpdate=$false; $Script:DoWinget=$false
+            $Script:DoCleanup=$true; $Script:DoWinUpdate=$false; $Script:DoWinget=$false
             $Script:DoRepair=$false; $Script:DoRestorePoint=$false; $Script:DoAmd=$false
             $Script:DoShaderCleanup=$true; $Script:DoGamingOptimize=$false
         }
         'UpdatesOnly' {
-            $Script:DoCleanup=$false; $Script:DoUpdates=$true; $Script:DoWinUpdate=$true; $Script:DoWinget=$true
+            $Script:DoCleanup=$false; $Script:DoWinUpdate=$true; $Script:DoWinget=$true
             $Script:DoRepair=$false; $Script:DoRestorePoint=$true; $Script:DoAmd=$true
             $Script:DoShaderCleanup=$false; $Script:DoGamingOptimize=$false
         }
         'Repair' {
-            $Script:DoCleanup=$false; $Script:DoUpdates=$false; $Script:DoWinUpdate=$false; $Script:DoWinget=$false
+            $Script:DoCleanup=$false; $Script:DoWinUpdate=$false; $Script:DoWinget=$false
             $Script:DoRepair=$true; $Script:DoRestorePoint=$true; $Script:DoAmd=$false
             $Script:DoShaderCleanup=$false; $Script:DoGamingOptimize=$false
         }
         'FullRepair' {
-            $Script:DoCleanup=$true; $Script:DoUpdates=$true; $Script:DoWinUpdate=$true; $Script:DoWinget=$true
+            $Script:DoCleanup=$true; $Script:DoWinUpdate=$true; $Script:DoWinget=$true
             $Script:DoRepair=$true; $Script:DoRestorePoint=$true; $Script:DoAmd=$true
             $Script:DoShaderCleanup=$true; $Script:DoGamingOptimize=$true
         }
@@ -380,20 +479,27 @@ function New-MaintenanceRestorePoint {
 function Remove-OldFilesInPath {
     param([string]$Path, [int]$OlderThanDays, [switch]$DeleteFoldersToo)
     if (-not (Test-Path $Path)) { return 0 }
+    Assert-NotCancelled
     $cutoff = (Get-Date).AddDays(-$OlderThanDays)
     $freed = 0L
     $n = 0
     Get-ChildItem -Path $Path -Recurse -Force -File -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime -lt $cutoff } |
         ForEach-Object {
+            if (Test-CancelRequested) { return }
             try { $freed += $_.Length; Remove-Item $_.FullName -Force -ErrorAction Stop } catch { }
             $n++
-            if (($n % 80) -eq 0) { Pump-UiThrottled }
+            if (($n % 80) -eq 0) {
+                Assert-NotCancelled
+                Pump-UiThrottled
+            }
         }
+    if (Test-CancelRequested) { return $freed }
     if ($DeleteFoldersToo) {
         Get-ChildItem -Path $Path -Recurse -Force -Directory -ErrorAction SilentlyContinue |
             Sort-Object FullName -Descending |
             ForEach-Object {
+                if (Test-CancelRequested) { return }
                 try {
                     if (-not (Get-ChildItem $_.FullName -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
                         Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
@@ -407,17 +513,14 @@ function Remove-OldFilesInPath {
 function Invoke-TempCleanup {
     Write-Step "Cleaning temp files (older than $($Script:TempOlderThanDays) day(s))"
     $total = 0L
+    # GPU shader caches are handled only by Invoke-ShaderCacheCleanup (checkbox-driven)
     $raw = @(
         $env:TEMP,
         "$env:LOCALAPPDATA\Temp",
         "C:\Windows\Temp",
         "$env:LOCALAPPDATA\CrashDumps",
         "$env:LOCALAPPDATA\Microsoft\Windows\INetCache",
-        "$env:LOCALAPPDATA\Microsoft\Windows\WebCache",
-        "$env:LOCALAPPDATA\D3DSCache",
-        "$env:LOCALAPPDATA\AMD\DxCache",
-        "$env:LOCALAPPDATA\AMD\Dx9Cache",
-        "$env:LOCALAPPDATA\AMD\DxcCache"
+        "$env:LOCALAPPDATA\Microsoft\Windows\WebCache"
     )
     $paths = @()
     $seen = @{}
@@ -643,27 +746,85 @@ function Start-WindowsUpdateFallbackScan {
 function Invoke-WingetUpdates {
     Write-Step "Upgrading apps (winget)"
     try {
+        Assert-NotCancelled
         $winget = (Get-Command winget -EA Stop).Source
-        Write-Info "Scanning for app upgrades (background)..."
+        Write-Info "Listing available winget upgrades..."
+        $listObj = Invoke-WithUiWait -Activity "winget list upgrades" -TimeoutSec 300 -ArgumentList @($winget) -ScriptBlock {
+            param([string]$WingetPath)
+            & $WingetPath upgrade --include-unknown --disable-interactivity 2>&1 | Out-String
+        }
+        $listOut = Get-AsyncResultText $listObj
+        if ($null -eq $listOut) {
+            Write-Warn "winget list timed out or cancelled"
+            return
+        }
+        Write-Log $listOut
+
+        $packageLines = @()
+        foreach ($line in ($listOut -split "`r?`n")) {
+            if ($line -match '^\s*$' -or $line -match '^Name\s+Id\s+Version' -or $line -match '^-+' -or $line -match '^\s*\d+\s+upgrades? available' -or $line -match 'No installed package found' -or $line -match 'No newer package versions') {
+                continue
+            }
+            if ($line -match '\S+\s+\S+\s+\S+') { $packageLines += $line.Trim() }
+        }
+        # winget often prints a footer like "5 upgrades available."
+        $countFromFooter = 0
+        if ($listOut -match '(\d+)\s+upgrades?\s+available') { $countFromFooter = [int]$Matches[1] }
+        $count = if ($countFromFooter -gt 0) { $countFromFooter } else { $packageLines.Count }
+
+        if ($listOut -match "No installed package found matching input criteria|No newer package versions" -or $count -eq 0) {
+            Write-Ok "winget apps are up to date"
+            return
+        }
+
+        Write-Info ("Found {0} upgradeable package(s)" -f $count)
+        $preview = ($packageLines | Select-Object -First 12) -join "`n"
+        if ($packageLines.Count -gt 12) { $preview += "`n..." }
+
+        $proceed = $true
+        if (-not $Script:SkipWingetConfirm) {
+            try {
+                Add-Type -AssemblyName System.Windows.Forms -EA SilentlyContinue
+                $msg = "winget will upgrade approximately $count package(s).`n`nThis can update browsers, runtimes, and other apps.`n`nContinue?"
+                if ($preview) { $msg += "`n`n" + $preview }
+                $r = [System.Windows.Forms.MessageBox]::Show(
+                    $msg,
+                    "Confirm winget upgrades",
+                    [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                    [System.Windows.Forms.MessageBoxIcon]::Question
+                )
+                $proceed = ($r -eq [System.Windows.Forms.DialogResult]::Yes)
+            } catch {
+                Write-Host $msg
+                $ans = Read-Host "Continue with winget upgrades? (Y/N)"
+                $proceed = ($ans -match '^[Yy]')
+            }
+        }
+        if (-not $proceed) {
+            Write-Warn "winget upgrades skipped by user"
+            return
+        }
+
+        Assert-NotCancelled
+        Write-Info "Installing winget upgrades (background)..."
         $outObj = Invoke-WithUiWait -Activity "winget upgrade" -TimeoutSec 1200 -ArgumentList @($winget) -ScriptBlock {
             param([string]$WingetPath)
             & $WingetPath upgrade --all --accept-package-agreements --accept-source-agreements --disable-interactivity --include-unknown 2>&1 | Out-String
         }
         $out = Get-AsyncResultText $outObj
         if ($null -eq $out) {
-            Write-Warn "winget timed out"
+            Write-Warn "winget timed out or cancelled"
             return
         }
         Write-Log $out
-        if ($out -match "No installed package found matching input criteria|No newer package versions") {
-            Write-Ok "winget apps are up to date"
-        } elseif ($out -match "Successfully installed") {
-            $count = ([regex]::Matches($out, "Successfully installed")).Count
-            Write-Ok ("winget upgraded {0} package(s)" -f $count)
+        if ($out -match "Successfully installed") {
+            $okCount = ([regex]::Matches($out, "Successfully installed")).Count
+            Write-Ok ("winget upgraded {0} package(s)" -f $okCount)
         } else {
             Write-Ok "winget upgrade pass completed"
         }
     } catch {
+        if ($_.Exception.Message -match 'Cancelled') { throw }
         Write-Warn "winget not available or failed"
     }
 }
@@ -715,6 +876,87 @@ function Invoke-ShaderCacheCleanup {
     }
 }
 
+function Join-PathSafe {
+    param([string]$Base, [string]$Child)
+    if ([string]::IsNullOrWhiteSpace($Base)) { return $null }
+    try {
+        return [System.IO.Path]::Combine($Base.TrimEnd('\', '/'), $Child)
+    } catch {
+        return $null
+    }
+}
+
+function Test-PathSafe {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    try {
+        return [bool](Test-Path -LiteralPath $Path -ErrorAction SilentlyContinue)
+    } catch {
+        return $false
+    }
+}
+
+function Get-SteamDownloadingPaths {
+    $roots = [System.Collections.Generic.List[string]]::new()
+    $candidates = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($regPath in @(
+        "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam",
+        "HKLM:\SOFTWARE\Valve\Steam",
+        "HKCU:\SOFTWARE\Valve\Steam"
+    )) {
+        try {
+            $install = (Get-ItemProperty $regPath -Name InstallPath -EA SilentlyContinue).InstallPath
+            if ($install) { [void]$candidates.Add([string]$install) }
+        } catch { }
+    }
+
+    # Only probe fallbacks whose drive actually exists (Join-Path throws on missing drives)
+    $pf86 = ${env:ProgramFiles(x86)}
+    $pf = $env:ProgramFiles
+    foreach ($fallback in @(
+        $(if ($pf86) { Join-PathSafe $pf86 'Steam' }),
+        $(if ($pf) { Join-PathSafe $pf 'Steam' }),
+        'C:\Program Files (x86)\Steam',
+        'D:\Steam',
+        'E:\Steam'
+    )) {
+        if (-not $fallback) { continue }
+        if ($fallback -match '^[A-Za-z]:' -and -not (Test-PathSafe ($fallback.Substring(0, 1) + ':\'))) { continue }
+        [void]$candidates.Add($fallback)
+    }
+
+    $seen = @{}
+    foreach ($root in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($root)) { continue }
+        $key = $root.TrimEnd('\').ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+
+        if ($root -match '^[A-Za-z]:' -and -not (Test-PathSafe ($root.Substring(0, 1) + ':\'))) { continue }
+
+        $dl = Join-PathSafe $root 'steamapps\downloading'
+        if ($dl -and (Test-PathSafe $dl)) { [void]$roots.Add($dl) }
+
+        $vdf = Join-PathSafe $root 'steamapps\libraryfolders.vdf'
+        if (-not $vdf -or -not (Test-PathSafe $vdf)) { continue }
+        try {
+            $text = [System.IO.File]::ReadAllText($vdf)
+            foreach ($m in [regex]::Matches($text, '"path"\s+"([^"]+)"')) {
+                $lib = ($m.Groups[1].Value -replace '\\\\', '\').Trim()
+                if ([string]::IsNullOrWhiteSpace($lib)) { continue }
+                $libKey = $lib.TrimEnd('\').ToLowerInvariant()
+                if ($seen.ContainsKey($libKey)) { continue }
+                $seen[$libKey] = $true
+                if ($lib -match '^[A-Za-z]:' -and -not (Test-PathSafe ($lib.Substring(0, 1) + ':\'))) { continue }
+                $libDl = Join-PathSafe $lib 'steamapps\downloading'
+                if ($libDl -and (Test-PathSafe $libDl)) { [void]$roots.Add($libDl) }
+            }
+        } catch { }
+    }
+    return @($roots)
+}
+
 function Invoke-LauncherCacheCleanup {
     param(
         [bool]$Steam = $false,
@@ -724,26 +966,29 @@ function Invoke-LauncherCacheCleanup {
     Write-Step "Launcher download caches"
     $total = 0L
     if ($Steam) {
-        $steamRoots = @(
-            "C:\Program Files (x86)\Steam\steamapps\downloading",
-            "D:\Steam\steamapps\downloading",
-            "E:\Steam\steamapps\downloading"
-        )
+        $steamRoots = @(Get-SteamDownloadingPaths)
+        if ($steamRoots.Count -eq 0) {
+            Write-Info "Steam downloading folders not found"
+        }
         foreach ($p in $steamRoots) {
-            if (-not (Test-Path -LiteralPath $p)) { continue }
             Write-Info "Steam downloading: $p"
             $freed = Remove-OldFilesInPath -Path $p -OlderThanDays 0 -DeleteFoldersToo
             $total += $freed
         }
     }
     if ($Epic) {
-        $epic = @(
-            "$env:LOCALAPPDATA\EpicGamesLauncher\Saved\webcache",
-            "$env:LOCALAPPDATA\EpicGamesLauncher\Saved\webcache_4430",
-            "$env:LOCALAPPDATA\EpicGamesLauncher\Saved\Logs"
-        )
+        $epic = @(Get-EpicCachePaths)
+        if ($epic.Count -eq 0) {
+            # Fallback if Extras not loaded yet
+            $epic = @(
+                "$env:LOCALAPPDATA\EpicGamesLauncher\Saved\webcache",
+                "$env:LOCALAPPDATA\EpicGamesLauncher\Saved\webcache_4430",
+                "$env:LOCALAPPDATA\EpicGamesLauncher\Saved\Logs"
+            )
+        }
         foreach ($p in $epic) {
-            if (-not (Test-Path -LiteralPath $p)) { continue }
+            if (-not (Test-PathSafe $p)) { continue }
+            Write-Info "Epic: $p"
             $freed = Remove-OldFilesInPath -Path $p -OlderThanDays 0 -DeleteFoldersToo
             $total += $freed
         }
@@ -754,7 +999,7 @@ function Invoke-LauncherCacheCleanup {
             "$env:LOCALAPPDATA\Riot Games\Riot Client\Logs"
         )
         foreach ($p in $riot) {
-            if (-not (Test-Path -LiteralPath $p)) { continue }
+            if (-not (Test-PathSafe $p)) { continue }
             $freed = Remove-OldFilesInPath -Path $p -OlderThanDays 0 -DeleteFoldersToo
             $total += $freed
         }
@@ -795,11 +1040,26 @@ function Show-RebootRecommendedDialog {
     } catch { }
 }
 
+function Get-SystemDisk {
+    try {
+        $partition = Get-Partition -DriveLetter C -EA Stop
+        $phys = Get-PhysicalDisk -Number $partition.DiskNumber -EA SilentlyContinue
+        if ($phys) { return $phys }
+        return Get-PhysicalDisk | Where-Object { $_.DeviceId -eq $partition.DiskNumber } | Select-Object -First 1
+    } catch {
+        try { return Get-PhysicalDisk | Select-Object -First 1 } catch { return $null }
+    }
+}
+
 function Invoke-GamingChecks {
+    # Read-only status + service health. Does NOT change Game DVR / ReLive
+    # (those are only changed by Invoke-GamingOptimize).
     Write-Step "Quick health / gaming checks"
     try {
-        $disk = Get-PhysicalDisk | Select-Object -First 1
-        Write-Ok ("SSD: {0} - {1}" -f $disk.FriendlyName, $disk.HealthStatus)
+        $disk = Get-SystemDisk
+        if ($disk) {
+            Write-Ok ("System disk (C:): {0} - {1}" -f $disk.FriendlyName, $disk.HealthStatus)
+        }
     } catch { }
 
     try {
@@ -810,11 +1070,10 @@ function Invoke-GamingChecks {
     $gamedvr = (Get-ItemProperty "HKCU:\System\GameConfigStore" -Name GameDVR_Enabled -EA SilentlyContinue).GameDVR_Enabled
     if ($gamedvr -eq 0) {
         Write-Ok "Xbox Game DVR: Off"
+    } elseif ($null -eq $gamedvr) {
+        Write-Info "Xbox Game DVR: Unknown"
     } else {
-        Write-Warn "Xbox Game DVR was On - disabling..."
-        Set-ItemProperty "HKCU:\System\GameConfigStore" -Name GameDVR_Enabled -Value 0 -Type DWord -Force -EA SilentlyContinue
-        Set-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" -Name AppCaptureEnabled -Value 0 -Type DWord -Force -EA SilentlyContinue
-        Write-Ok "Xbox Game DVR set to Off"
+        Write-Info "Xbox Game DVR: On (use Gaming optimize to turn off)"
     }
 
     $relive = (Get-ItemProperty "HKCU:\Software\AMD\DVR" -Name DvrEnabled -EA SilentlyContinue).DvrEnabled
@@ -823,9 +1082,7 @@ function Invoke-GamingChecks {
     } elseif ($relive -eq 0) {
         Write-Ok "AMD ReLive: Off"
     } else {
-        Write-Warn "AMD ReLive was On - disabling..."
-        Set-ItemProperty "HKCU:\Software\AMD\DVR" -Name DvrEnabled -Value 0 -Type DWord -Force -EA SilentlyContinue
-        Write-Ok "AMD ReLive set to Off"
+        Write-Info "AMD ReLive: On (use Gaming optimize to turn off)"
     }
 
     try {
@@ -853,13 +1110,21 @@ function Invoke-GamingChecks {
 function Invoke-Repair {
     Write-Step "Windows Repair (DISM + SFC)"
     Write-Info "This can take 10-30+ minutes. Do not close the window."
+    Assert-NotCancelled
 
     try {
         Write-Info "DISM /RestoreHealth starting..."
+        Ensure-SessionLog
         $dismLog = Join-Path (Split-Path $Script:LogFile) "dism_$(Get-Date -Format 'HHmmss').log"
         $p = Start-Process -FilePath "DISM.exe" -ArgumentList "/Online","/Cleanup-Image","/RestoreHealth","/LogPath:$dismLog" -PassThru -NoNewWindow
+        Register-TrackedProcess $p
         $spin = @('|','/','-','\'); $i = 0
         while (-not $p.HasExited) {
+            if (Test-CancelRequested) {
+                try { $p.Kill() } catch { }
+                Write-Warn "DISM cancelled"
+                return
+            }
             $sec = [int]((Get-Date) - $p.StartTime).TotalSeconds
             Write-Host -NoNewline ("`r  [{0}] DISM running... {1}s   " -f $spin[$i % 4], $sec) -ForegroundColor DarkYellow
             Set-UiStatusText -Text ("[{0}] DISM running... {1}s" -f $spin[$i % 4], $sec)
@@ -879,14 +1144,22 @@ function Invoke-Repair {
             Write-Warn "DISM exit code $code - see $dismLog"
         }
     } catch {
+        if ($_.Exception.Message -match 'Cancelled') { throw }
         Write-Fail "DISM failed: $($_.Exception.Message)"
     }
 
+    Assert-NotCancelled
     try {
         Write-Info "SFC /scannow starting..."
         $p = Start-Process -FilePath "sfc.exe" -ArgumentList "/scannow" -PassThru -NoNewWindow
+        Register-TrackedProcess $p
         $spin = @('|','/','-','\'); $i = 0
         while (-not $p.HasExited) {
+            if (Test-CancelRequested) {
+                try { $p.Kill() } catch { }
+                Write-Warn "SFC cancelled"
+                return
+            }
             $sec = [int]((Get-Date) - $p.StartTime).TotalSeconds
             Write-Host -NoNewline ("`r  [{0}] SFC running... {1}s   " -f $spin[$i % 4], $sec) -ForegroundColor DarkYellow
             Set-UiStatusText -Text ("[{0}] SFC running... {1}s" -f $spin[$i % 4], $sec)
@@ -903,6 +1176,7 @@ function Invoke-Repair {
             Write-Ok "SFC finished (exit $code) - see CBS.log if issues persist"
         }
     } catch {
+        if ($_.Exception.Message -match 'Cancelled') { throw }
         Write-Fail "SFC failed: $($_.Exception.Message)"
     }
 }
@@ -924,8 +1198,12 @@ function Get-RunSummaryText {
 }
 
 function Invoke-MaintenanceRun {
+    $Script:CancelRequested = $false
+    if ($Script:UiShare) { $Script:UiShare['CancelRequested'] = $false }
+    Clear-TrackedProcesses
     $Script:Report.Clear()
     $Script:RunStart = Get-Date
+    Ensure-SessionLog
     Init-Log
     Build-StepPlan
     $Script:StartFree = Get-CFreeGB
@@ -934,24 +1212,36 @@ function Invoke-MaintenanceRun {
     Write-Log "Free before: $($Script:StartFree) GB"
     Write-Info ("Plan: " + ($Script:StepNames -join " > "))
 
-    if ($Script:DoRestorePoint) { New-MaintenanceRestorePoint }
-    if ($Script:DoCleanup) {
-        Invoke-TempCleanup
-        Invoke-BrowserCacheCleanup
-        Invoke-RecycleAndCleanMgr
-    }
-    if ($Script:DoShaderCleanup) { Invoke-ShaderCacheCleanup }
-    if ($Script:DoWinUpdate) { Invoke-WindowsUpdate }
-    if ($Script:DoWinget) { Invoke-WingetUpdates }
-    if ($Script:DoAmd) { Invoke-AmdOpen }
-    if ($Script:DoRepair) { Invoke-Repair }
-    if ($Script:DoGamingOptimize) {
-        if (Get-Command Invoke-GamingOptimize -EA SilentlyContinue) {
-            Invoke-GamingOptimize
+    try {
+        if ($Script:DoRestorePoint) { New-MaintenanceRestorePoint; Assert-NotCancelled }
+        if ($Script:DoCleanup) {
+            Invoke-TempCleanup
+            Assert-NotCancelled
+            Invoke-BrowserCacheCleanup
+            Assert-NotCancelled
+            Invoke-RecycleAndCleanMgr
+        }
+        if ($Script:DoShaderCleanup) { Assert-NotCancelled; Invoke-ShaderCacheCleanup }
+        if ($Script:DoWinUpdate) { Assert-NotCancelled; Invoke-WindowsUpdate }
+        if ($Script:DoWinget) { Assert-NotCancelled; Invoke-WingetUpdates }
+        if ($Script:DoAmd) { Assert-NotCancelled; Invoke-AmdOpen }
+        if ($Script:DoRepair) { Assert-NotCancelled; Invoke-Repair }
+        if ($Script:DoGamingOptimize) {
+            Assert-NotCancelled
+            if (Get-Command Invoke-GamingOptimize -EA SilentlyContinue) {
+                Invoke-GamingOptimize
+            }
+        }
+
+        Assert-NotCancelled
+        Invoke-GamingChecks
+    } catch {
+        if ($_.Exception.Message -match 'Cancelled') {
+            Write-Warn "Run cancelled by user"
+        } else {
+            throw
         }
     }
-
-    Invoke-GamingChecks
 
     $Script:CurrentStep = $Script:TotalSteps
     Update-UiProgress -Label "DONE"
@@ -963,6 +1253,12 @@ function Invoke-MaintenanceRun {
     Append-UiLog $summary "Cyan"
     Write-Log "DONE"
     Write-Log $summary
-    Show-RebootRecommendedDialog
+    if (-not (Test-CancelRequested)) {
+        Show-RebootRecommendedDialog
+        if (Get-Command Show-RunSummaryDialog -EA SilentlyContinue) {
+            Show-RunSummaryDialog -Title "PC Maintenance - Summary" -Summary (Get-RunSummaryObject)
+        }
+    }
+    Clear-TrackedProcesses
     return $summary
 }

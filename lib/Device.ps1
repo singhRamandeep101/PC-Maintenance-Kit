@@ -77,16 +77,38 @@ function Get-DeviceSummary {
     $diskName = "Unknown"
     $diskHealth = "Unknown"
     try {
-        $d = Get-PhysicalDisk | Select-Object -First 1
-        $diskName = $d.FriendlyName
-        $diskHealth = [string]$d.HealthStatus
+        $d = $null
+        if (Get-Command Get-SystemDisk -EA SilentlyContinue) {
+            $d = Get-SystemDisk
+        }
+        if (-not $d) {
+            $partition = Get-Partition -DriveLetter C -EA SilentlyContinue
+            if ($partition) {
+                $d = Get-PhysicalDisk -Number $partition.DiskNumber -EA SilentlyContinue
+            }
+        }
+        if (-not $d) { $d = Get-PhysicalDisk | Select-Object -First 1 }
+        if ($d) {
+            $diskName = $d.FriendlyName
+            $diskHealth = [string]$d.HealthStatus
+        }
     } catch { }
 
     $trim = "Unknown"
     try {
         $vol = Get-Volume -DriveLetter C -EA SilentlyContinue
-        if ($vol) {
-            $trim = "Available (SSD TRIM supported on modern Windows)"
+        if ($vol -and $vol.FileSystemType -eq 'NTFS') {
+            $media = $null
+            try {
+                if (Get-Command Get-SystemDisk -EA SilentlyContinue) { $media = Get-SystemDisk }
+            } catch { }
+            if ($media -and $media.MediaType -match 'SSD|Unspecified') {
+                $trim = "SSD detected (TRIM supported on modern Windows)"
+            } elseif ($media -and $media.MediaType -match 'HDD') {
+                $trim = "HDD (TRIM not applicable)"
+            } else {
+                $trim = "NTFS volume (TRIM available if drive is SSD)"
+            }
         }
     } catch { }
 
@@ -143,7 +165,7 @@ function Invoke-DeviceHealthReport {
     } else {
         Write-Ok ("RAM: {0} GB / {1} stick(s) - {2}" -f $s.RamGb, $s.RamSticks, $s.RamChannels)
     }
-    Write-Ok ("SSD: {0} - {1}" -f $s.DiskName, $s.DiskHealth)
+    Write-Ok ("Disk (C:): {0} - {1}" -f $s.DiskName, $s.DiskHealth)
     Write-Ok ("C: free: {0} GB" -f $s.FreeGb)
     Write-Ok ("Power plan: {0}" -f $s.PowerPlan)
     if ($s.RebootPending) {

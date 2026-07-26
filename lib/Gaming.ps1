@@ -79,10 +79,22 @@ function Get-DiscordHardwareAcceleration {
 function Set-DiscordHardwareAcceleration([bool]$Enabled) {
     $p = Get-DiscordSettingsPath
     if (-not (Test-Path $p)) { throw "Discord settings.json not found. Is Discord installed?" }
-    $raw = Get-Content $p -Raw -Encoding UTF8
-    $j = $raw | ConvertFrom-Json
-    $j | Add-Member -NotePropertyName hardwareAcceleration -NotePropertyValue $Enabled -Force
-    ($j | ConvertTo-Json -Depth 20) | Set-Content -Path $p -Encoding UTF8
+
+    $raw = [System.IO.File]::ReadAllText($p)
+    $valueText = if ($Enabled) { "true" } else { "false" }
+    $pattern = '"hardwareAcceleration"\s*:\s*(true|false)'
+    if ($raw -match $pattern) {
+        $updated = [regex]::Replace($raw, $pattern, ('"hardwareAcceleration": ' + $valueText), 1)
+    } else {
+        # Insert after opening brace without rewriting the whole JSON tree
+        $updated = [regex]::Replace($raw, '^\s*\{', ('{' + "`n  `"hardwareAcceleration`": $valueText,"), 1)
+        if ($updated -eq $raw) {
+            throw "Could not update Discord settings.json"
+        }
+    }
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($p, $updated, $utf8NoBom)
 }
 
 function Invoke-GamingOptimize {

@@ -22,6 +22,10 @@ Copy-Item (Join-Path $Root "lib\*.ps1") (Join-Path $Stage "lib")
 if (Test-Path (Join-Path $Root "docs\screenshots")) {
     Copy-Item (Join-Path $Root "docs\screenshots\*") (Join-Path $Stage "docs") -Force -EA SilentlyContinue
 }
+if (Test-Path (Join-Path $Root "tests")) {
+    New-Item -ItemType Directory -Path (Join-Path $Stage "tests") -Force | Out-Null
+    Copy-Item (Join-Path $Root "tests\*") (Join-Path $Stage "tests") -Force -EA SilentlyContinue
+}
 
 Compress-Archive -Path $Stage -DestinationPath $Zip -Force
 Write-Host "Created: $Zip"

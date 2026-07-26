@@ -22,6 +22,7 @@ try {
     . (Join-Path $Script:AppRoot "lib\Core.ps1")
     . (Join-Path $Script:AppRoot "lib\Gaming.ps1")
     . (Join-Path $Script:AppRoot "lib\Device.ps1")
+    . (Join-Path $Script:AppRoot "lib\Extras.ps1")
     . (Join-Path $Script:AppRoot "lib\Gui.ps1")
 
     $relaunch = "-Mode $Mode"
@@ -29,8 +30,11 @@ try {
     Ensure-Admin -ScriptPath $PSCommandPath -RelaunchArgs $relaunch
 
     $ErrorActionPreference = 'Continue'
-    try { $host.UI.RawUI.WindowTitle = "PC Maintenance Kit v5.1" } catch { }
+    try { $host.UI.RawUI.WindowTitle = "PC Maintenance Kit v$($Script:AppVersion)" } catch { }
     $Script:TempOlderThanDays = $TempOlderThanDays
+    # Session log for all modes
+    Ensure-SessionLog
+    Init-Log -ForceNew
 
     switch ($Mode) {
         'Gui' {
