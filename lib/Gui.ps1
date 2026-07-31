@@ -940,7 +940,7 @@ function Show-MaintenanceGui {
     $pageUpd.Controls.Add($cardUpd)
 
     $updHint = New-Object System.Windows.Forms.Label
-    $updHint.Text = "Installs Windows Update + winget apps. Self-updaters (Roblox, Discord, Steam, Epic) are skipped."
+    $updHint.Text = "Installs Windows Update + winget apps. Self-updaters (Roblox, Discord, Steam, Epic) are skipped. (v5.1.1)"
     $updHint.ForeColor = $t.Muted
     $updHint.Location = New-Object System.Drawing.Point(20, 48)
     $updHint.Size = New-Object System.Drawing.Size(900, 28)
