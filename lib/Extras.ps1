@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-$Script:AppVersion = "5.1.1"
+$Script:AppVersion = "5.1.2"
 $Script:GitHubRepo = "singhRamandeep101/PC-Maintenance-Kit"
 
 function Get-LogsDirectory {
@@ -352,16 +352,21 @@ function Get-GitHubLatestRelease {
         $req = [System.Net.HttpWebRequest]::Create($url)
         $req.UserAgent = "PC-Maintenance-Kit"
         $req.Accept = "application/vnd.github+json"
-        $req.Timeout = 8000
+        $req.Timeout = 12000
         $resp = $req.GetResponse()
         try {
             $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
             $json = $reader.ReadToEnd() | ConvertFrom-Json
+            $zipAsset = @($json.assets) |
+                Where-Object { $_.name -and ($_.name -match '\.zip$') -and $_.browser_download_url } |
+                Select-Object -First 1
             return [pscustomobject]@{
-                Tag    = [string]$json.tag_name
-                Name   = [string]$json.name
-                Url    = [string]$json.html_url
-                Latest = ([string]$json.tag_name).TrimStart('v', 'V')
+                Tag     = [string]$json.tag_name
+                Name    = [string]$json.name
+                Url     = [string]$json.html_url
+                Latest  = ([string]$json.tag_name).TrimStart('v', 'V')
+                ZipUrl  = if ($zipAsset) { [string]$zipAsset.browser_download_url } else { $null }
+                ZipName = if ($zipAsset) { [string]$zipAsset.name } else { $null }
             }
         } finally {
             $resp.Close()
@@ -410,18 +415,175 @@ function Test-AppUpdateAvailable {
     }
 }
 
+function Invoke-AppSelfUpdate {
+    param($Release)
+    if (-not $Release) { throw "No release info" }
+    if (-not $Release.ZipUrl) {
+        throw "This GitHub release has no ZIP attached. Re-publish the release with the build ZIP."
+    }
+    if (-not $Script:AppRoot -or -not (Test-Path -LiteralPath $Script:AppRoot)) {
+        throw "App folder not found."
+    }
+
+    $work = Join-Path $env:TEMP ("PCMK-update-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    $extract = Join-Path $work "extract"
+    $zipName = if ($Release.ZipName) { $Release.ZipName } else { "update.zip" }
+    $zipPath = Join-Path $work $zipName
+    New-Item -ItemType Directory -Path $extract -Force | Out-Null
+
+    Write-Info ("Downloading {0}..." -f $Release.Tag)
+    Set-UiStatusText ("Downloading {0}..." -f $Release.Tag)
+    Pump-Ui
+
+    $download = Invoke-WithUiWait -Activity ("Downloading {0}" -f $Release.Tag) -TimeoutSec 300 -ArgumentList @($Release.ZipUrl, $zipPath) -ScriptBlock {
+        param([string]$Url, [string]$OutFile)
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            $wc = New-Object System.Net.WebClient
+            $wc.Headers.Add("User-Agent", "PC-Maintenance-Kit")
+            $wc.DownloadFile($Url, $OutFile)
+            if (-not (Test-Path -LiteralPath $OutFile) -or ((Get-Item -LiteralPath $OutFile).Length -lt 1000)) {
+                "ERR:Download too small or missing"
+            } else {
+                "OK"
+            }
+        } catch {
+            "ERR:" + $_.Exception.Message
+        }
+    }
+    $dlText = Get-AsyncResultText $download
+    if ($dlText -ne "OK") {
+        $msg = if ($dlText -like "ERR:*") { $dlText.Substring(4) } elseif ($null -eq $dlText) { "download timed out" } else { $dlText }
+        throw "Download failed: $msg"
+    }
+    Write-Ok ("Downloaded {0}" -f $zipName)
+
+    Write-Info "Extracting update..."
+    Set-UiStatusText "Extracting update..."
+    Pump-Ui
+    Expand-Archive -LiteralPath $zipPath -DestinationPath $extract -Force
+
+    $payloadPs1 = Get-ChildItem -LiteralPath $extract -Recurse -Filter "PC-Maintenance.ps1" -File -EA SilentlyContinue |
+        Select-Object -First 1
+    if (-not $payloadPs1) {
+        throw "Update ZIP is missing PC-Maintenance.ps1"
+    }
+    $payloadRoot = Split-Path -Parent $payloadPs1.FullName
+
+    $applyPs1 = Join-Path $work "Apply-Update.ps1"
+    $startBat = Join-Path $Script:AppRoot "Start.bat"
+    $applyBody = @"
+#Requires -Version 5.1
+`$ErrorActionPreference = 'Continue'
+`$target = @'
+$($Script:AppRoot)
+'@
+`$source = @'
+$payloadRoot
+'@
+`$parentPid = $PID
+`$startBat = @'
+$startBat
+'@
+`$work = @'
+$work
+'@
+
+try {
+    `$deadline = (Get-Date).AddSeconds(90)
+    while ((Get-Date) -lt `$deadline) {
+        try {
+            `$p = Get-Process -Id `$parentPid -EA Stop
+            if (-not `$p -or `$p.HasExited) { break }
+        } catch { break }
+        Start-Sleep -Milliseconds 400
+    }
+    Start-Sleep -Seconds 1
+
+    if (-not (Test-Path -LiteralPath `$source)) { throw "Update source missing" }
+    if (-not (Test-Path -LiteralPath `$target)) { throw "App folder missing" }
+
+    Get-ChildItem -LiteralPath `$source -Force | ForEach-Object {
+        `$dest = Join-Path `$target `$_.Name
+        if (`$_.PSIsContainer) {
+            Copy-Item -LiteralPath `$_.FullName -Destination `$dest -Recurse -Force
+        } else {
+            Copy-Item -LiteralPath `$_.FullName -Destination `$dest -Force
+        }
+    }
+
+    if (Test-Path -LiteralPath `$startBat) {
+        Start-Process -FilePath `$startBat -WorkingDirectory `$target
+    } else {
+        `$ps1 = Join-Path `$target 'PC-Maintenance.ps1'
+        `$ps = Join-Path `$env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        Start-Process -FilePath `$ps -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-WindowStyle','Hidden','-File',`$ps1,'-Mode','Gui') -WorkingDirectory `$target
+    }
+} catch {
+    `$logDir = Join-Path ([Environment]::GetFolderPath('Desktop')) 'PC-Maintenance-Logs'
+    if (-not (Test-Path `$logDir)) { New-Item -ItemType Directory -Path `$logDir -Force | Out-Null }
+    `$_ | Out-File (Join-Path `$logDir 'update-error.log') -Encoding utf8
+} finally {
+    Start-Sleep -Seconds 2
+    try { Remove-Item -LiteralPath `$work -Recurse -Force -EA SilentlyContinue } catch { }
+}
+"@
+    Set-Content -LiteralPath $applyPs1 -Value $applyBody -Encoding UTF8
+
+    Write-Info "Installing update and restarting..."
+    Set-UiStatusText "Installing update and restarting..."
+    Pump-Ui
+
+    $psExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    Start-Process -FilePath $psExe -ArgumentList @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-WindowStyle", "Hidden",
+        "-File", $applyPs1
+    ) | Out-Null
+
+    Start-Sleep -Milliseconds 500
+    if ($Script:MainForm -and -not $Script:MainForm.IsDisposed) {
+        try { $Script:MainForm.Close() } catch { }
+    }
+    exit 0
+}
+
 function Show-UpdateAvailableDialog {
     param($Release)
     if (-not $Release) { return }
     try {
         Add-Type -AssemblyName System.Windows.Forms -EA SilentlyContinue
+        $hasZip = [bool]$Release.ZipUrl
+        $msg = if ($hasZip) {
+            "A newer release is available.`n`nThis PC: v{0}`nLatest: {1}`n`nDownload and install now?`nThe app will restart automatically." -f $Script:AppVersion, $Release.Tag
+        } else {
+            "A newer release is available.`n`nThis PC: v{0}`nLatest: {1}`n`nNo ZIP is attached to this release, so one-click update is unavailable.`nOpen GitHub releases page?" -f $Script:AppVersion, $Release.Tag
+        }
         $r = [System.Windows.Forms.MessageBox]::Show(
-            ("A newer release is available.`n`nThis PC: v{0}`nLatest: {1}`n`nOpen GitHub releases page?" -f $Script:AppVersion, $Release.Tag),
+            $msg,
             "PC Maintenance Kit - Update",
             [System.Windows.Forms.MessageBoxButtons]::YesNo,
             [System.Windows.Forms.MessageBoxIcon]::Information
         )
-        if ($r -eq [System.Windows.Forms.DialogResult]::Yes -and $Release.Url) {
+        if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
+        if ($hasZip) {
+            try {
+                Invoke-AppSelfUpdate -Release $Release
+            } catch {
+                Write-Fail $_.Exception.Message
+                $fallback = [System.Windows.Forms.MessageBox]::Show(
+                    ("Automatic update failed:`n{0}`n`nOpen GitHub releases page instead?" -f $_.Exception.Message),
+                    "PC Maintenance Kit - Update",
+                    [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                    [System.Windows.Forms.MessageBoxIcon]::Warning
+                )
+                if ($fallback -eq [System.Windows.Forms.DialogResult]::Yes -and $Release.Url) {
+                    Start-Process $Release.Url
+                }
+            }
+        } elseif ($Release.Url) {
             Start-Process $Release.Url
         }
     } catch { }

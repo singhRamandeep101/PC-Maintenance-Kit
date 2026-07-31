@@ -550,6 +550,7 @@ function Show-MaintenanceGui {
     $Script:LastProgressPct = 0
 
     $form = New-Object System.Windows.Forms.Form
+    $Script:MainForm = $form
     $form.Text = "PC Maintenance Kit v$($Script:AppVersion)"
     $form.Size = New-Object System.Drawing.Size(1060, 780)
     $form.StartPosition = "CenterScreen"
@@ -940,7 +941,7 @@ function Show-MaintenanceGui {
     $pageUpd.Controls.Add($cardUpd)
 
     $updHint = New-Object System.Windows.Forms.Label
-    $updHint.Text = "Installs Windows Update + winget apps. Self-updaters (Roblox, Discord, Steam, Epic) are skipped. (v5.1.1)"
+    $updHint.Text = "Installs Windows Update + winget apps. Self-updaters (Roblox, Discord, Steam, Epic) are skipped."
     $updHint.ForeColor = $t.Muted
     $updHint.Location = New-Object System.Drawing.Point(20, 48)
     $updHint.Size = New-Object System.Drawing.Size(900, 28)
@@ -1104,7 +1105,7 @@ function Show-MaintenanceGui {
     $btnRefreshDevice = New-PremiumButton "Refresh" (New-Object System.Drawing.Point(24, 52)) (New-Object System.Drawing.Size(280, 40)) "Ghost"
     $btnCopyRamTip = New-PremiumButton "Copy RAM upgrade tip" (New-Object System.Drawing.Point(24, 104)) (New-Object System.Drawing.Size(280, 40)) "Ghost"
     $btnOpenStorage = New-PremiumButton "Open Storage settings" (New-Object System.Drawing.Point(24, 156)) (New-Object System.Drawing.Size(280, 40)) "Muted"
-    $btnCheckUpdate = New-PremiumButton "Check for app update" (New-Object System.Drawing.Point(24, 208)) (New-Object System.Drawing.Size(280, 40)) "Ghost"
+    $btnCheckUpdate = New-PremiumButton "Check / install app update" (New-Object System.Drawing.Point(24, 208)) (New-Object System.Drawing.Size(280, 40)) "Ghost"
     $btnRestartNow = New-PremiumButton "Restart PC now" (New-Object System.Drawing.Point(24, 260)) (New-Object System.Drawing.Size(280, 40)) "Danger"
     $cardDevAct.Controls.AddRange(@($btnRefreshDevice, $btnCopyRamTip, $btnOpenStorage, $btnCheckUpdate, $btnRestartNow))
 
