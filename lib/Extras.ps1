@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-$Script:AppVersion = "5.1.2"
+$Script:AppVersion = "5.1.3"
 $Script:GitHubRepo = "singhRamandeep101/PC-Maintenance-Kit"
 
 function Get-LogsDirectory {
@@ -503,14 +503,11 @@ try {
     if (-not (Test-Path -LiteralPath `$source)) { throw "Update source missing" }
     if (-not (Test-Path -LiteralPath `$target)) { throw "App folder missing" }
 
-    Get-ChildItem -LiteralPath `$source -Force | ForEach-Object {
-        `$dest = Join-Path `$target `$_.Name
-        if (`$_.PSIsContainer) {
-            Copy-Item -LiteralPath `$_.FullName -Destination `$dest -Recurse -Force
-        } else {
-            Copy-Item -LiteralPath `$_.FullName -Destination `$dest -Force
-        }
-    }
+    # robocopy avoids Copy-Item nesting bug (lib -> lib\lib when destination exists)
+    `$rc = Join-Path `$env:SystemRoot 'System32\robocopy.exe'
+    & `$rc `$source `$target /E /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+    `$code = `$LASTEXITCODE
+    if (`$code -ge 8) { throw "robocopy failed with code `$code" }
 
     if (Test-Path -LiteralPath `$startBat) {
         Start-Process -FilePath `$startBat -WorkingDirectory `$target
@@ -542,11 +539,9 @@ try {
         "-File", $applyPs1
     ) | Out-Null
 
-    Start-Sleep -Milliseconds 500
-    if ($Script:MainForm -and -not $Script:MainForm.IsDisposed) {
-        try { $Script:MainForm.Close() } catch { }
-    }
-    exit 0
+    # Close cleanly after UI handlers unwind (exit/Close here causes WinForms "System error")
+    $Script:ExitAfterUpdate = $true
+    Write-Ok "Update ready - restarting..."
 }
 
 function Show-UpdateAvailableDialog {
@@ -572,6 +567,7 @@ function Show-UpdateAvailableDialog {
             try {
                 Invoke-AppSelfUpdate -Release $Release
             } catch {
+                $Script:ExitAfterUpdate = $false
                 Write-Fail $_.Exception.Message
                 $fallback = [System.Windows.Forms.MessageBox]::Show(
                     ("Automatic update failed:`n{0}`n`nOpen GitHub releases page instead?" -f $_.Exception.Message),

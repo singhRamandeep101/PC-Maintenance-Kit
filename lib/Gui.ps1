@@ -453,6 +453,14 @@ function Invoke-GuiAction {
         }
     } finally {
         Clear-TrackedProcesses
+        if ($Script:ExitAfterUpdate) {
+            try {
+                if ($Script:MainForm -and -not $Script:MainForm.IsDisposed) {
+                    $Script:MainForm.Close()
+                }
+            } catch { }
+            return
+        }
         Set-GuiBusy $false
         Pump-Ui
     }
@@ -1222,6 +1230,9 @@ function Show-MaintenanceGui {
                 $check = Test-AppUpdateAvailable -Silent
                 if ($check -and $check.Status -eq 'UpdateAvailable') {
                     Show-UpdateAvailableDialog $check.Release
+                    if ($Script:ExitAfterUpdate) {
+                        try { $form.Close() } catch { }
+                    }
                 }
             } catch { }
         })
