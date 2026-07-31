@@ -459,10 +459,10 @@ function Invoke-GuiAction {
                     $Script:MainForm.Close()
                 }
             } catch { }
-            return
+        } else {
+            Set-GuiBusy $false
+            Pump-Ui
         }
-        Set-GuiBusy $false
-        Pump-Ui
     }
 }
 
