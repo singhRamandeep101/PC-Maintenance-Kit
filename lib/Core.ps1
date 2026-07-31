@@ -25,7 +25,7 @@ $Script:BgPowerShell = $null
 $Script:SkipWingetConfirm = $false
 
 function Reset-MaintenanceFlags {
-    # Safe weekly defaults — callers override what they need
+    # Safe weekly defaults - callers override what they need
     $Script:DoCleanup = $true
     $Script:DoWinUpdate = $false
     $Script:DoWinget = $false
@@ -263,6 +263,9 @@ function Write-Log([string]$msg) {
 
 function Get-Elapsed {
     $ts = (Get-Date) - $Script:RunStart
+    if ($ts.TotalHours -ge 1) {
+        return "{0:00}:{1:00}:{2:00}" -f [int]$ts.TotalHours, $ts.Minutes, $ts.Seconds
+    }
     return "{0:00}:{1:00}" -f [int]$ts.TotalMinutes, $ts.Seconds
 }
 
@@ -275,7 +278,7 @@ function Update-UiProgress {
     }
     $pct = [math]::Min(100, [math]::Round(($Script:CurrentStep / $Script:TotalSteps) * 100))
     Set-UiProgressValue -Value ([int]$pct)
-    $plain = ("Running: {0}  ·  {1}/{2}  ·  {3}" -f $Label, $Script:CurrentStep, $Script:TotalSteps, (Get-Elapsed))
+    $plain = ("Running: {0}  |  {1}/{2}  |  {3}" -f $Label, $Script:CurrentStep, $Script:TotalSteps, (Get-Elapsed))
     Set-UiStatusText -Text $plain
     if (Get-Command Update-GuiStatusBar -EA SilentlyContinue) {
         Update-GuiStatusBar -JobText $plain
@@ -347,7 +350,8 @@ function Write-Info([string]$msg) {
 }
 
 function Get-CFreeGB {
-    $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+    $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction SilentlyContinue
+    if (-not $d -or $null -eq $d.FreeSpace) { return 0 }
     return [math]::Round($d.FreeSpace / 1GB, 1)
 }
 
@@ -645,6 +649,50 @@ function Invoke-RecycleAndCleanMgr {
     }
 }
 
+function Get-WindowsUpdateTitlesFromAsync {
+    param($Result)
+    $titles = [System.Collections.Generic.List[string]]::new()
+    if ($null -eq $Result) {
+        return @{ Status = "ERR"; Titles = @(); Message = "No result" }
+    }
+
+    $payload = $null
+    foreach ($item in @($Result)) {
+        if ($null -eq $item) { continue }
+        if ($item -is [System.Management.Automation.PSCustomObject] -or $item -is [hashtable]) {
+            $payload = $item
+        }
+    }
+    if ($null -eq $payload) {
+        $payload = @($Result) | Select-Object -Last 1
+    }
+
+    $status = $null
+    try { $status = [string]$payload.Status } catch { $status = $null }
+    if ($status -eq "ERR") {
+        $msg = ""
+        try { $msg = [string]$payload.Message } catch { }
+        return @{ Status = "ERR"; Titles = @(); Message = $msg }
+    }
+    if ($status -eq "OK") {
+        $rawTitles = @()
+        try { $rawTitles = @($payload.Titles) } catch { $rawTitles = @() }
+        foreach ($t in $rawTitles) {
+            if ($null -eq $t) { continue }
+            # Never foreach a [string] as IEnumerable - that yields characters
+            if ($t -is [string]) {
+                if ($t.Trim()) { [void]$titles.Add($t.Trim()) }
+                continue
+            }
+            $s = "$t".Trim()
+            if ($s) { [void]$titles.Add($s) }
+        }
+        return @{ Status = "OK"; Titles = @($titles | Select-Object -Unique); Message = $null }
+    }
+
+    return @{ Status = "ERR"; Titles = @(); Message = "Unexpected Windows Update scan result" }
+}
+
 function Invoke-WindowsUpdate {
     Write-Step "Windows Updates"
     Write-Info "Scan runs in the background so the window stays responsive"
@@ -665,7 +713,7 @@ function Invoke-WindowsUpdate {
             }
             $instText = Get-AsyncResultText $installed
             if ($instText -ne "OK") {
-                Write-Warn "Module install failed - starting Windows Update scan via UsoClient"
+                Write-Warn "Module install failed - cannot install updates from this app"
                 Start-WindowsUpdateFallbackScan
                 return
             }
@@ -673,35 +721,38 @@ function Invoke-WindowsUpdate {
         }
 
         Write-Info "Scanning Windows Update (can take several minutes on first run)..."
-        # STA + Windows Update only (no -MicrosoftUpdate) — Microsoft Update catalog often hangs/timeouts
+        # STA + Windows Update only (no -MicrosoftUpdate) - Microsoft Update catalog often hangs/timeouts
         $scan = Invoke-WithUiWait -Activity "Scanning Windows Update" -TimeoutSec 1200 -Sta -ScriptBlock {
-            Import-Module PSWindowsUpdate -Force -EA Stop
-            $list = @(Get-WindowsUpdate -WindowsUpdate -ErrorAction Stop)
-            ,@($list | ForEach-Object {
-                if ($_.Title) { [string]$_.Title }
-                elseif ($_.KB) { "KB$($_.KB)" }
-                else { $_.ToString() }
-            })
+            try {
+                Import-Module PSWindowsUpdate -Force -EA Stop
+                $list = @(Get-WindowsUpdate -WindowsUpdate -ErrorAction Stop)
+                $titles = [System.Collections.Generic.List[string]]::new()
+                foreach ($u in $list) {
+                    if ($null -eq $u) { continue }
+                    if ($u.Title) { [void]$titles.Add([string]$u.Title) }
+                    elseif ($u.KB) { [void]$titles.Add("KB$($u.KB)") }
+                    else { [void]$titles.Add([string]$u.ToString()) }
+                }
+                ,[pscustomobject]@{ Status = "OK"; Titles = @($titles); Message = $null }
+            } catch {
+                ,[pscustomobject]@{ Status = "ERR"; Titles = @(); Message = $_.Exception.Message }
+            }
         }
 
         if ($null -eq $scan) {
-            Write-Warn "Windows Update scan timed out after 20 min - starting Settings scan instead"
+            Write-Warn "Windows Update scan timed out after 20 min - opening Settings (scan only, nothing installed)"
             Start-WindowsUpdateFallbackScan
             return
         }
 
-        $titles = @()
-        foreach ($item in @($scan)) {
-            if ($item -is [System.Array] -or $item -is [System.Collections.IEnumerable]) {
-                foreach ($t in @($item)) {
-                    if ($t -and "$t".Trim()) { $titles += [string]$t }
-                }
-            } elseif ($item -and "$item".Trim()) {
-                $titles += [string]$item
-            }
+        $parsed = Get-WindowsUpdateTitlesFromAsync $scan
+        if ($parsed.Status -eq "ERR") {
+            Write-Fail ("Windows Update scan failed: {0}" -f $(if ($parsed.Message) { $parsed.Message } else { "unknown error" }))
+            Start-WindowsUpdateFallbackScan
+            return
         }
-        $titles = @($titles | Where-Object { $_ } | Select-Object -Unique)
 
+        $titles = @($parsed.Titles)
         if ($titles.Count -gt 0) {
             Write-Info ("Found {0} update(s). Installing..." -f $titles.Count)
             $n = 0
@@ -710,16 +761,104 @@ function Invoke-WindowsUpdate {
                 Write-Info ("Update {0}/{1}: {2}" -f $n, $titles.Count, $t)
             }
             $install = Invoke-WithUiWait -Activity "Installing Windows Updates" -TimeoutSec 3600 -Sta -ScriptBlock {
-                Import-Module PSWindowsUpdate -Force -EA Stop
-                Get-WindowsUpdate -WindowsUpdate -AcceptAll -Install -IgnoreReboot -ErrorAction Stop | Out-Null
-                "OK"
+                try {
+                    Import-Module PSWindowsUpdate -Force -EA Stop
+                    $results = @(Get-WindowsUpdate -WindowsUpdate -AcceptAll -Install -IgnoreReboot -ErrorAction Stop)
+                    $ok = 0; $fail = 0; $reboot = 0
+                    $notes = New-Object System.Collections.Generic.List[string]
+                    foreach ($r in $results) {
+                        $title = if ($r.Title) { [string]$r.Title } elseif ($r.KB) { "KB$($r.KB)" } else { "update" }
+                        $rc = $null
+                        try { $rc = $r.Result } catch { }
+                        if (-not $rc) { try { $rc = $r.Status } catch { } }
+                        $rcText = if ($null -ne $rc) { "$rc" } else { "" }
+                        $needReboot = $false
+                        try { if ($r.RebootRequired) { $needReboot = $true; $reboot++ } } catch { }
+                        if ($rcText -match '(?i)fail|error|abort') {
+                            $fail++
+                            [void]$notes.Add(("FAIL: {0} ({1})" -f $title, $rcText))
+                        } elseif ($rcText -match '(?i)installed|downloaded|ok|success' -or $needReboot -or [string]::IsNullOrWhiteSpace($rcText)) {
+                            $ok++
+                            if ($needReboot) { [void]$notes.Add(("REBOOT: {0}" -f $title)) }
+                        } else {
+                            $ok++
+                            [void]$notes.Add(("RESULT: {0} ({1})" -f $title, $rcText))
+                        }
+                    }
+                    if ($results.Count -eq 0) {
+                        "EMPTY"
+                    } elseif ($fail -gt 0 -and $ok -eq 0) {
+                        "ERR:" + (($notes | Select-Object -First 3) -join "; ")
+                    } else {
+                        "OK|installed=$ok|failed=$fail|reboot=$reboot|" + (($notes | Select-Object -First 5) -join "; ")
+                    }
+                } catch {
+                    "ERR:" + $_.Exception.Message
+                }
             }
             if ($null -eq $install) {
                 Write-Warn "Install timed out - open Settings > Windows Update to finish"
                 Start-WindowsUpdateFallbackScan
                 return
             }
-            Write-Ok "Windows Updates installed (reboot may be required)"
+            $instText = Get-AsyncResultText $install
+            if ($instText -eq "EMPTY") {
+                Write-Warn "Windows Update install returned no results - check Settings > Windows Update"
+            } elseif ($instText -like "ERR:*") {
+                Write-Fail ("Windows Update install failed: {0}" -f $instText.Substring(4))
+                Start-WindowsUpdateFallbackScan
+                return
+            } elseif ($instText -like "OK|*") {
+                Write-Ok "Windows Updates install pass finished"
+                if ($instText -match 'reboot=([1-9]\d*)') {
+                    Write-Warn "At least one update needs a reboot before it fully applies"
+                }
+                if ($instText -match 'failed=([1-9]\d*)') {
+                    Write-Warn "Some updates reported failure - see log"
+                    Write-Log $instText
+                }
+            } elseif ($instText -ne "OK") {
+                $errMsg = if ($instText -like "ERR:*") { $instText.Substring(4) } else { $instText }
+                Write-Fail ("Windows Update install failed: {0}" -f $(if ($errMsg) { $errMsg } else { "unknown error" }))
+                Start-WindowsUpdateFallbackScan
+                return
+            } else {
+                Write-Ok "Windows Updates install pass finished (reboot may be required)"
+            }
+
+            # Re-scan so we do not claim success while Settings still lists updates
+            Write-Info "Re-scanning to verify remaining updates..."
+            $verify = Invoke-WithUiWait -Activity "Verifying Windows Update" -TimeoutSec 900 -Sta -ScriptBlock {
+                try {
+                    Import-Module PSWindowsUpdate -Force -EA Stop
+                    $list = @(Get-WindowsUpdate -WindowsUpdate -ErrorAction Stop)
+                    $titles = [System.Collections.Generic.List[string]]::new()
+                    foreach ($u in $list) {
+                        if ($null -eq $u) { continue }
+                        if ($u.Title) { [void]$titles.Add([string]$u.Title) }
+                        elseif ($u.KB) { [void]$titles.Add("KB$($u.KB)") }
+                        else { [void]$titles.Add([string]$u.ToString()) }
+                    }
+                    ,[pscustomobject]@{ Status = "OK"; Titles = @($titles); Message = $null }
+                } catch {
+                    ,[pscustomobject]@{ Status = "ERR"; Titles = @(); Message = $_.Exception.Message }
+                }
+            }
+            if ($null -ne $verify) {
+                $vParsed = Get-WindowsUpdateTitlesFromAsync $verify
+                if ($vParsed.Status -eq "OK" -and @($vParsed.Titles).Count -gt 0) {
+                    Write-Warn ("{0} update(s) still pending - reboot, then check Settings > Windows Update" -f @($vParsed.Titles).Count)
+                    foreach ($t in @($vParsed.Titles | Select-Object -First 8)) {
+                        Write-Info ("  still pending: {0}" -f $t)
+                    }
+                } elseif ($vParsed.Status -eq "OK") {
+                    Write-Ok "Windows is up to date"
+                } else {
+                    Write-Warn "Could not verify remaining updates - check Settings > Windows Update"
+                }
+            } else {
+                Write-Warn "Verify scan timed out - check Settings > Windows Update (reboot may still be needed)"
+            }
         } else {
             Write-Ok "Windows is up to date"
         }
@@ -730,63 +869,140 @@ function Invoke-WindowsUpdate {
 }
 
 function Start-WindowsUpdateFallbackScan {
+    # Scan / open Settings only - does NOT install updates. Never report this as success.
+    Write-Warn "Fallback cannot install updates here - opening Windows Update so you can finish manually"
+    $started = $false
     try {
-        UsoClient StartInteractiveScan 2>$null
-        Write-Ok "Windows Update scan started in Settings (check Windows Update there)"
-    } catch {
-        try {
-            Start-Process "ms-settings:windowsupdate" -EA SilentlyContinue
-            Write-Ok "Opened Windows Update settings"
-        } catch {
-            Write-Warn "Could not start Windows Update fallback"
-        }
+        $p = Start-Process -FilePath "UsoClient.exe" -ArgumentList "StartInteractiveScan" -Wait -PassThru -WindowStyle Hidden -EA Stop
+        if ($p.ExitCode -eq 0) { $started = $true }
+    } catch { }
+    try {
+        Start-Process "ms-settings:windowsupdate" -EA SilentlyContinue
+        $started = $true
+    } catch { }
+    if ($started) {
+        Write-Warn "Windows Update Settings opened - install any listed updates there"
+    } else {
+        Write-Fail "Could not start Windows Update fallback"
     }
 }
 
 function Invoke-WingetUpdates {
     Write-Step "Upgrading apps (winget)"
+    # Packages that winget repeatedly "upgrades" (unknown versions / self-updaters) - skip them
+    $wingetSkipIds = @(
+        "Roblox.Roblox",
+        "Discord.Discord",
+        "EpicGames.EpicGamesLauncher",
+        "Valve.Steam"
+    )
     try {
         Assert-NotCancelled
         $winget = (Get-Command winget -EA Stop).Source
         Write-Info "Listing available winget upgrades..."
+        # No --include-unknown: that flag makes apps like Roblox look upgradeable forever
         $listObj = Invoke-WithUiWait -Activity "winget list upgrades" -TimeoutSec 300 -ArgumentList @($winget) -ScriptBlock {
             param([string]$WingetPath)
-            & $WingetPath upgrade --include-unknown --disable-interactivity 2>&1 | Out-String
+            $text = & $WingetPath upgrade --disable-interactivity 2>&1 | Out-String
+            [pscustomobject]@{ Output = $text; ExitCode = $LASTEXITCODE }
         }
-        $listOut = Get-AsyncResultText $listObj
-        if ($null -eq $listOut) {
+        if ($null -eq $listObj) {
             Write-Warn "winget list timed out or cancelled"
+            return
+        }
+        $listPayload = @($listObj) | Select-Object -Last 1
+        $listOut = ""
+        try { $listOut = [string]$listPayload.Output } catch { $listOut = Get-AsyncResultText $listObj }
+        if ([string]::IsNullOrWhiteSpace($listOut)) {
+            Write-Warn "winget list returned no output"
             return
         }
         Write-Log $listOut
 
-        $packageLines = @()
-        foreach ($line in ($listOut -split "`r?`n")) {
-            if ($line -match '^\s*$' -or $line -match '^Name\s+Id\s+Version' -or $line -match '^-+' -or $line -match '^\s*\d+\s+upgrades? available' -or $line -match 'No installed package found' -or $line -match 'No newer package versions') {
-                continue
-            }
-            if ($line -match '\S+\s+\S+\s+\S+') { $packageLines += $line.Trim() }
-        }
-        # winget often prints a footer like "5 upgrades available."
-        $countFromFooter = 0
-        if ($listOut -match '(\d+)\s+upgrades?\s+available') { $countFromFooter = [int]$Matches[1] }
-        $count = if ($countFromFooter -gt 0) { $countFromFooter } else { $packageLines.Count }
-
-        if ($listOut -match "No installed package found matching input criteria|No newer package versions" -or $count -eq 0) {
+        if ($listOut -match "No newer package versions" -or
+            ($listOut -match "No installed package found matching input criteria" -and $listOut -notmatch '\dupgrades?\s+available')) {
             Write-Ok "winget apps are up to date"
             return
         }
 
-        Write-Info ("Found {0} upgradeable package(s)" -f $count)
+        $packageLines = @()
+        $packageIds = [System.Collections.Generic.List[string]]::new()
+        $skipped = [System.Collections.Generic.List[string]]::new()
+        $idCol = -1
+        $verCol = -1
+        foreach ($line in ($listOut -split "`r?`n")) {
+            if ($line -match '^\s*$') { continue }
+            if ($line -match '^Name\s+Id\s+Version') {
+                $idCol = $line.IndexOf('Id')
+                $verCol = $line.IndexOf('Version')
+                continue
+            }
+            if ($line -match '^-+' -or $line -match '^\s*\d+\s+upgrades? available' -or $line -match '^\s*\d+\s+package' -or $line -match 'No installed package found' -or $line -match 'No newer package versions' -or $line -match 'version numbers that cannot be determined') {
+                continue
+            }
+
+            $id = $null
+            # Fixed-width columns from header (handles Node.js names and msstore Ids)
+            if ($idCol -ge 0 -and $verCol -gt $idCol -and $line.Length -gt $idCol) {
+                $end = [Math]::Min($verCol, $line.Length)
+                $id = $line.Substring($idCol, $end - $idCol).Trim()
+            }
+            if (-not $id) {
+                # Fallback: last Publisher.Product-style token before version columns
+                $idMatches = [regex]::Matches($line, '(?<![A-Za-z0-9_.+-])([A-Za-z][A-Za-z0-9_+-]*(?:\.[A-Za-z0-9][A-Za-z0-9_+-]*)+)(?![A-Za-z0-9_.+-])')
+                if ($idMatches.Count -gt 0) {
+                    $id = $idMatches[$idMatches.Count - 1].Groups[1].Value
+                }
+            }
+            if (-not $id -or $id -match '^(Name|Id|Version|Available|Source|winget|msstore)$' -or $id -match '^\d') { continue }
+
+            $skip = $false
+            foreach ($s in $wingetSkipIds) {
+                if ($id -ieq $s) { $skip = $true; break }
+            }
+            if ($skip) {
+                if (-not ($skipped -contains $id)) { [void]$skipped.Add($id) }
+                continue
+            }
+            if (-not ($packageIds -contains $id)) {
+                [void]$packageIds.Add($id)
+                $packageLines += $line.Trim()
+            }
+        }
+        if ($skipped.Count -gt 0) {
+            Write-Info ("Skipping self-updating apps: {0}" -f (($skipped | Select-Object -Unique) -join ", "))
+        }
+
+        $countFromFooter = 0
+        if ($listOut -match '(\d+)\s+upgrades?\s+available') { $countFromFooter = [int]$Matches[1] }
+        $count = $packageIds.Count
+        $useUpgradeAll = $false
+        if ($count -eq 0) {
+            if ($countFromFooter -gt 0) {
+                # Could not parse Ids (unusual layout) - upgrade all known versions, still no --include-unknown
+                Write-Warn "Could not parse package Ids from winget table - upgrading all applicable packages"
+                $useUpgradeAll = $true
+                $count = $countFromFooter
+            } else {
+                Write-Ok "winget apps are up to date"
+                return
+            }
+        }
+
+        if (-not $useUpgradeAll) {
+            Write-Info ("Found {0} upgradeable package(s): {1}" -f $count, ($packageIds -join ", "))
+        } else {
+            Write-Info ("Found {0} upgradeable package(s)" -f $count)
+        }
         $preview = ($packageLines | Select-Object -First 12) -join "`n"
         if ($packageLines.Count -gt 12) { $preview += "`n..." }
 
         $proceed = $true
         if (-not $Script:SkipWingetConfirm) {
+            $msg = "winget will upgrade $count package(s).`n`nThis can update browsers, runtimes, and other apps.`nSelf-updaters (Roblox, Discord, Steam, Epic) are skipped.`n`nContinue?"
+            if ($preview) { $msg += "`n`n" + $preview }
             try {
-                Add-Type -AssemblyName System.Windows.Forms -EA SilentlyContinue
-                $msg = "winget will upgrade approximately $count package(s).`n`nThis can update browsers, runtimes, and other apps.`n`nContinue?"
-                if ($preview) { $msg += "`n`n" + $preview }
+                Add-Type -AssemblyName System.Windows.Forms -EA Stop
                 $r = [System.Windows.Forms.MessageBox]::Show(
                     $msg,
                     "Confirm winget upgrades",
@@ -807,21 +1023,91 @@ function Invoke-WingetUpdates {
 
         Assert-NotCancelled
         Write-Info "Installing winget upgrades (background)..."
-        $outObj = Invoke-WithUiWait -Activity "winget upgrade" -TimeoutSec 1200 -ArgumentList @($winget) -ScriptBlock {
-            param([string]$WingetPath)
-            & $WingetPath upgrade --all --accept-package-agreements --accept-source-agreements --disable-interactivity --include-unknown 2>&1 | Out-String
+        # Pass Ids as one string - PowerShell flattens arrays in -ArgumentList
+        $idsJoined = if ($useUpgradeAll) { "" } else { [string]::Join("`n", [string[]]@($packageIds)) }
+        $outObj = Invoke-WithUiWait -Activity "winget upgrade" -TimeoutSec 1200 -ArgumentList @($winget, $idsJoined) -ScriptBlock {
+            param([string]$WingetPath, [string]$IdsJoined)
+            $parts = New-Object System.Collections.Generic.List[string]
+            $ok = 0
+            $fail = 0
+            $okIds = New-Object System.Collections.Generic.List[string]
+            $failIds = New-Object System.Collections.Generic.List[string]
+            $Ids = @()
+            if ($IdsJoined -and $IdsJoined.Trim()) {
+                $Ids = @($IdsJoined -split "`n" | Where-Object { $_ -and $_.Trim() })
+            }
+            if ($Ids.Count -gt 0) {
+                foreach ($id in $Ids) {
+                    [void]$parts.Add(("--- upgrading {0} ---" -f $id))
+                    $text = & $WingetPath upgrade --id $id --exact --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+                    [void]$parts.Add($text)
+                    if ($text -match "Successfully installed") {
+                        $ok++
+                        [void]$okIds.Add($id)
+                    } elseif ($text -match "does not apply to your system") {
+                        $fail++
+                        [void]$failIds.Add("$id (not applicable to this PC)")
+                    } elseif ($text -match "No applicable upgrade|No newer package versions") {
+                        # already current
+                    } else {
+                        $fail++
+                        [void]$failIds.Add($id)
+                    }
+                }
+            } else {
+                # No --include-unknown: avoids endless Roblox/"unknown version" upgrades
+                $text = & $WingetPath upgrade --all --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+                [void]$parts.Add($text)
+                $ok = ([regex]::Matches($text, "Successfully installed")).Count
+                if ($ok -eq 0 -and $text -match "does not apply to your system") {
+                    $fail = 1
+                    [void]$failIds.Add("(some packages not applicable)")
+                } elseif ($ok -eq 0 -and $text -notmatch "No applicable upgrade|No newer package versions|No installed package found") {
+                    if ($LASTEXITCODE -ne 0) {
+                        $fail = 1
+                        [void]$failIds.Add("upgrade --all")
+                    }
+                }
+            }
+            [pscustomobject]@{
+                Output    = ($parts -join "`n")
+                OkCount   = $ok
+                FailCount = $fail
+                OkIds     = ($okIds -join ", ")
+                FailIds   = ($failIds -join ", ")
+            }
         }
-        $out = Get-AsyncResultText $outObj
-        if ($null -eq $out) {
+        if ($null -eq $outObj) {
             Write-Warn "winget timed out or cancelled"
             return
         }
+        $outPayload = @($outObj) | Select-Object -Last 1
+        $out = ""
+        $okCount = 0
+        $failCount = 0
+        $failIds = ""
+        try {
+            $out = [string]$outPayload.Output
+            $okCount = [int]$outPayload.OkCount
+            $failCount = [int]$outPayload.FailCount
+            $failIds = [string]$outPayload.FailIds
+        } catch {
+            $out = Get-AsyncResultText $outObj
+            if ($out -match "Successfully installed") {
+                $okCount = ([regex]::Matches($out, "Successfully installed")).Count
+            }
+        }
         Write-Log $out
-        if ($out -match "Successfully installed") {
-            $okCount = ([regex]::Matches($out, "Successfully installed")).Count
+        if ($okCount -gt 0) {
             Write-Ok ("winget upgraded {0} package(s)" -f $okCount)
-        } else {
-            Write-Ok "winget upgrade pass completed"
+        }
+        if ($failCount -gt 0) {
+            Write-Warn ("winget failed for {0} package(s): {1}" -f $failCount, $(if ($failIds) { $failIds } else { "see log" }))
+        }
+        if ($okCount -eq 0 -and $failCount -eq 0) {
+            Write-Ok "winget apps are up to date"
+        } elseif ($okCount -eq 0 -and $failCount -gt 0) {
+            Write-Warn "No packages were upgraded - see log"
         }
     } catch {
         if ($_.Exception.Message -match 'Cancelled') { throw }
@@ -1173,7 +1459,7 @@ function Invoke-Repair {
         if ($null -eq $code -or $code -eq 0) {
             Write-Ok "SFC finished successfully"
         } else {
-            Write-Ok "SFC finished (exit $code) - see CBS.log if issues persist"
+            Write-Warn "SFC finished with exit $code - see CBS.log if issues persist"
         }
     } catch {
         if ($_.Exception.Message -match 'Cancelled') { throw }

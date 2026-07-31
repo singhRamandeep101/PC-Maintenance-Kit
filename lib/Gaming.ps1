@@ -18,11 +18,15 @@ function Get-GameDvrEnabled {
 }
 
 function Disable-GameDvrCapture {
-    Set-ItemProperty "HKCU:\System\GameConfigStore" -Name GameDVR_Enabled -Value 0 -Type DWord -Force -EA SilentlyContinue
+    $store = "HKCU:\System\GameConfigStore"
+    if (-not (Test-Path $store)) { New-Item -Path $store -Force | Out-Null }
+    Set-ItemProperty $store -Name GameDVR_Enabled -Value 0 -Type DWord -Force -EA SilentlyContinue
     $gdv = "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR"
     if (-not (Test-Path $gdv)) { New-Item -Path $gdv -Force | Out-Null }
     Set-ItemProperty $gdv -Name AppCaptureEnabled -Value 0 -Type DWord -Force -EA SilentlyContinue
-    Set-ItemProperty "HKCU:\Software\Microsoft\GameBar" -Name UseNexusForGameBarEnabled -Value 0 -Type DWord -Force -EA SilentlyContinue
+    $gbar = "HKCU:\Software\Microsoft\GameBar"
+    if (-not (Test-Path $gbar)) { New-Item -Path $gbar -Force | Out-Null }
+    Set-ItemProperty $gbar -Name UseNexusForGameBarEnabled -Value 0 -Type DWord -Force -EA SilentlyContinue
 }
 
 function Get-AmdReLiveEnabled {

@@ -471,7 +471,7 @@ function Update-GuiHomeSummary {
         }
         if ($Script:GuiControls.RamMain) {
             $part = if ($s.RamPartNumber) { $s.RamPartNumber } else { "" }
-            $line = "{0} GB  ·  {1} stick(s)" -f $s.RamGb, $s.RamSticks
+            $line = "{0} GB  |  {1} stick(s)" -f $s.RamGb, $s.RamSticks
             if ($part) { $line = "$line`n$part" }
             $Script:GuiControls.RamMain.Text = $line
             $Script:GuiControls.RamStat.Text = $s.RamChannels
@@ -550,7 +550,7 @@ function Show-MaintenanceGui {
     $Script:LastProgressPct = 0
 
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "PC Maintenance Kit v5.1"
+    $form.Text = "PC Maintenance Kit v$($Script:AppVersion)"
     $form.Size = New-Object System.Drawing.Size(1060, 780)
     $form.StartPosition = "CenterScreen"
     $form.BackColor = $t.Bg
@@ -576,7 +576,7 @@ function Show-MaintenanceGui {
     $header.Controls.Add($brand)
 
     $ver = New-Object System.Windows.Forms.Label
-    $ver.Text = "v5.1  ·  Gamer Toolkit"
+    $ver.Text = "v$($Script:AppVersion)  -  Gamer Toolkit"
     $ver.ForeColor = $t.Accent
     $ver.AutoSize = $true
     $ver.Location = New-Object System.Drawing.Point(26, 42)
@@ -867,7 +867,7 @@ function Show-MaintenanceGui {
     $cardOpts.Controls.AddRange(@($btnWeekly, $btnRefreshHome))
 
     $nextLbl = New-Object System.Windows.Forms.Label
-    $nextLbl.Text = "Weekly kit · safe defaults (WU/winget off)"
+    $nextLbl.Text = "Weekly kit - safe defaults (WU/winget off)"
     $nextLbl.ForeColor = $t.Muted
     $nextLbl.Location = New-Object System.Drawing.Point(20, 292)
     $nextLbl.AutoSize = $true
@@ -940,7 +940,7 @@ function Show-MaintenanceGui {
     $pageUpd.Controls.Add($cardUpd)
 
     $updHint = New-Object System.Windows.Forms.Label
-    $updHint.Text = "Run updates when you are not in a ranked match. Driver apps open separately."
+    $updHint.Text = "Installs Windows Update + winget apps. Self-updaters (Roblox, Discord, Steam, Epic) are skipped."
     $updHint.ForeColor = $t.Muted
     $updHint.Location = New-Object System.Drawing.Point(20, 48)
     $updHint.Size = New-Object System.Drawing.Size(900, 28)
@@ -1190,10 +1190,11 @@ function Show-MaintenanceGui {
 
     $Script:UiShare = [hashtable]::Synchronized(@{
         CancelRequested = $false
-        Queue           = $null
+        Queue           = [System.Collections.Concurrent.ConcurrentQueue[hashtable]]::new()
     })
 
     $saved = Load-GuiSettings
+    $Script:LoadedGuiSettings = $saved
     Apply-GuiSettings -Controls $Script:GuiControls -Settings $saved
 
     Ensure-SessionLog
@@ -1251,7 +1252,7 @@ function Show-MaintenanceGui {
             $Script:DoWinget = [bool]$Script:GuiControls.ChkHomeWinget.Checked
             $Script:DoAmd = $false
             $Script:DoRepair = $false
-            $Script:TempOlderThanDays = 2
+            $Script:TempOlderThanDays = [int]$Script:GuiControls.DaysNum.Value
             [void](Invoke-MaintenanceRun)
         }
     })
@@ -1592,7 +1593,7 @@ function Show-CliMenu {
     Clear-Host
     Write-Host ""
     Write-Host "  ========================================"
-    Write-Host "     PC MAINTENANCE KIT v5.1 (Gamer)"
+    Write-Host "     PC MAINTENANCE KIT v$($Script:AppVersion) (Gamer)"
     Write-Host "  ========================================"
     Write-Host "  Logs: Desktop\PC-Maintenance-Logs"
     Write-Host ""

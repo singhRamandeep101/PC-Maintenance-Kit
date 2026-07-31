@@ -36,6 +36,10 @@ function Save-GuiSettings {
     param($Controls)
     if (-not $Controls) { return }
     try {
+        $checkUpdates = $true
+        if ($Script:LoadedGuiSettings -and $null -ne $Script:LoadedGuiSettings.CheckUpdatesOnStart) {
+            $checkUpdates = [bool]$Script:LoadedGuiSettings.CheckUpdatesOnStart
+        }
         $obj = [ordered]@{
             HomeRestore     = [bool]$Controls.ChkHomeRestore.Checked
             HomeShader      = [bool]$Controls.ChkHomeShader.Checked
@@ -51,8 +55,9 @@ function Save-GuiSettings {
             UpdWU           = [bool]$Controls.ChkUpdWU.Checked
             UpdWinget       = [bool]$Controls.ChkUpdWinget.Checked
             RepRestore      = [bool]$Controls.ChkRepRestore.Checked
-            CheckUpdatesOnStart = $true
+            CheckUpdatesOnStart = $checkUpdates
         }
+        $Script:LoadedGuiSettings = $obj
         $json = ($obj | ConvertTo-Json -Depth 5)
         $utf8 = New-Object System.Text.UTF8Encoding $false
         [System.IO.File]::WriteAllText((Get-GuiSettingsPath), $json, $utf8)
@@ -322,7 +327,7 @@ function Show-RunSummaryDialog {
         $body = @(
             "Time: $($Summary.Elapsed)"
             "C: free: $($Summary.FreeBefore) GB -> $($Summary.FreeAfter) GB ($($Summary.SpaceChange) GB)"
-            "Results: $($Summary.OkCount) OK · $($Summary.WarnCount) warn · $($Summary.FailCount) fail"
+            "Results: $($Summary.OkCount) OK | $($Summary.WarnCount) warn | $($Summary.FailCount) fail"
             "Restart pending: $reboot"
             "Log: $($Summary.LogFile)"
         ) -join "`n"
