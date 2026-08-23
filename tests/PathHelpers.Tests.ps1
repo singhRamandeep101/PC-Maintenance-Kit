@@ -58,7 +58,7 @@ $settingsPath = Get-GuiSettingsPath
 $appDataPrefix = Join-Path $env:LOCALAPPDATA 'PC-Maintenance-Kit'
 Assert-True ($settingsPath.StartsWith($appDataPrefix)) 'GUI settings live under LocalAppData'
 
-Assert-True ($Script:AppVersion -eq '5.1.5') 'AppVersion is 5.1.5'
+Assert-True ($Script:AppVersion -eq '5.1.6') 'AppVersion is 5.1.6'
 
 Apply-ModeFlags Full
 Assert-True ($Script:DoWinUpdate -eq $false) 'Weekly Full leaves Windows Update off'
@@ -92,6 +92,13 @@ foreach ($rel in $parseFiles) {
     $ok = -not $errs -or $errs.Count -eq 0
     Assert-True $ok ("Parse $rel")
 }
+
+$hashProbe = Join-Path $env:TEMP 'pcmk-hash-probe.txt'
+Set-Content -LiteralPath $hashProbe -Value 'pcmk' -Encoding ASCII
+$h = (Get-FileHash -LiteralPath $hashProbe -Algorithm SHA256).Hash.ToLowerInvariant()
+$sumLine = "{0}  pcmk-hash-probe.txt" -f $h
+Assert-True ($sumLine -match '([A-Fa-f0-9]{64})' -and $Matches[1].ToLowerInvariant() -eq $h) 'SHA256 checksum line format'
+Remove-Item -LiteralPath $hashProbe -Force -EA SilentlyContinue
 
 if ($failed -gt 0) {
     Write-Host "`n$failed test(s) failed." -ForegroundColor Red

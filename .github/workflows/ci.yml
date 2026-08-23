@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run tests
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\PathHelpers.Tests.ps1
+
+      - name: Build ZIP and verify SHA256
+        env:
+          PCMK_SIGN_PFX_BASE64: ${{ secrets.PCMK_SIGN_PFX_BASE64 }}
+          PCMK_SIGN_PFX_PASSWORD: ${{ secrets.PCMK_SIGN_PFX_PASSWORD }}
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-Release.ps1
+          $zip = Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'dist') -Filter 'PC-Maintenance-Kit-v*.zip' |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $zip) { throw "ZIP was not created in dist\" }
+          $sha = $zip.FullName + '.sha256'
+          if (-not (Test-Path -LiteralPath $sha)) { throw "Checksum file was not created: $sha" }
+          $raw = Get-Content -LiteralPath $sha -Raw
+          if ($raw -notmatch '([A-Fa-f0-9]{64})') { throw "Checksum file did not contain a SHA256 hash." }
+          $expected = $Matches[1].ToLowerInvariant()
+          $actual = (Get-FileHash -LiteralPath $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "SHA256 mismatch. expected=$expected actual=$actual"
+          }
+          Write-Host ("SHA256 OK {0}  {1}" -f $actual, $zip.Name)
