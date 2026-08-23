@@ -32,9 +32,6 @@ try {
     $ErrorActionPreference = 'Continue'
     try { $host.UI.RawUI.WindowTitle = "PC Maintenance Kit v$($Script:AppVersion)" } catch { }
     $Script:TempOlderThanDays = $TempOlderThanDays
-    # Session log for all modes
-    Ensure-SessionLog
-    Init-Log -ForceNew
 
     switch ($Mode) {
         'Gui' {
@@ -55,12 +52,6 @@ try {
 catch {
     $msg = $_.Exception.Message
     $detail = $_ | Out-String
-    try {
-        $bootLog = Join-Path $env:USERPROFILE "Desktop\PC-Maintenance-Logs"
-        if (-not (Test-Path $bootLog)) { New-Item -ItemType Directory -Path $bootLog -Force | Out-Null }
-        $bootFile = Join-Path $bootLog "boot-error_$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
-        $detail | Out-File $bootFile -Encoding UTF8
-    } catch { }
 
     try {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue

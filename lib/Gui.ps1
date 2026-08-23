@@ -1,4 +1,4 @@
-$Script:GuiBusy = $false
+﻿$Script:GuiBusy = $false
 $Script:LastJobText = "Ready"
 $Script:LastProgressPct = 0
 $Script:Theme = $null
@@ -15,23 +15,24 @@ function Enable-DoubleBuffer($Control) {
 
 function Get-GuiTheme {
     return @{
-        Bg        = [System.Drawing.Color]::FromArgb(15, 23, 30)
-        Header    = [System.Drawing.Color]::FromArgb(18, 28, 36)
-        Panel     = [System.Drawing.Color]::FromArgb(22, 33, 43)
-        PanelAlt  = [System.Drawing.Color]::FromArgb(30, 42, 54)
-        Border    = [System.Drawing.Color]::FromArgb(40, 56, 70)
-        Accent    = [System.Drawing.Color]::FromArgb(38, 198, 168)
-        AccentDim = [System.Drawing.Color]::FromArgb(28, 140, 120)
-        Cta       = [System.Drawing.Color]::FromArgb(46, 125, 50)
-        CtaHover  = [System.Drawing.Color]::FromArgb(56, 142, 60)
-        Success   = [System.Drawing.Color]::FromArgb(56, 200, 120)
-        Warn      = [System.Drawing.Color]::FromArgb(210, 140, 60)
-        Danger    = [System.Drawing.Color]::FromArgb(190, 70, 70)
-        Text      = [System.Drawing.Color]::FromArgb(235, 240, 245)
-        Muted     = [System.Drawing.Color]::FromArgb(130, 148, 162)
-        LogBg     = [System.Drawing.Color]::FromArgb(8, 12, 16)
-        BtnGhost  = [System.Drawing.Color]::FromArgb(28, 40, 52)
-        IconBox   = [System.Drawing.Color]::FromArgb(18, 28, 36)
+        Bg        = [System.Drawing.Color]::FromArgb(7, 10, 18)
+        Header    = [System.Drawing.Color]::FromArgb(11, 17, 30)
+        Panel     = [System.Drawing.Color]::FromArgb(13, 20, 36)
+        PanelAlt  = [System.Drawing.Color]::FromArgb(19, 29, 50)
+        Border    = [System.Drawing.Color]::FromArgb(37, 53, 86)
+        Accent    = [System.Drawing.Color]::FromArgb(34, 211, 238)
+        Accent2   = [System.Drawing.Color]::FromArgb(167, 139, 250)
+        AccentDim = [System.Drawing.Color]::FromArgb(13, 148, 166)
+        Cta       = [System.Drawing.Color]::FromArgb(139, 92, 246)
+        CtaHover  = [System.Drawing.Color]::FromArgb(155, 113, 255)
+        Success   = [System.Drawing.Color]::FromArgb(52, 211, 153)
+        Warn      = [System.Drawing.Color]::FromArgb(251, 191, 36)
+        Danger    = [System.Drawing.Color]::FromArgb(251, 113, 133)
+        Text      = [System.Drawing.Color]::FromArgb(230, 237, 248)
+        Muted     = [System.Drawing.Color]::FromArgb(140, 163, 199)
+        LogBg     = [System.Drawing.Color]::FromArgb(4, 6, 12)
+        BtnGhost  = [System.Drawing.Color]::FromArgb(17, 27, 47)
+        IconBox   = [System.Drawing.Color]::FromArgb(16, 27, 48)
     }
 }
 
@@ -40,18 +41,142 @@ function Get-Mdl2Char([string]$Hex) {
     return [char][Convert]::ToInt32($clean, 16)
 }
 
+if (-not ('PCMK.Native' -as [type])) {
+    Add-Type -Namespace PCMK -Name Native -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+public static extern int DwmSetWindowAttribute(System.IntPtr hwnd, int attr, ref int val, int size);
+'@ -EA SilentlyContinue
+}
+
+function Enable-DarkTitleBar {
+    param($Form)
+    try {
+        foreach ($attr in @(20, 19)) {
+            $one = 1
+            $hr = [PCMK.Native]::DwmSetWindowAttribute($Form.Handle, $attr, [ref]$one, 4)
+            if ($hr -eq 0) { break }
+        }
+    } catch { }
+}
+
+function Set-RoundRegion {
+    param($Ctrl, [int]$Radius)
+    if (-not $Ctrl -or $Radius -le 0) { return }
+    try {
+        $w = [Math]::Max(2, $Ctrl.Width)
+        $h = [Math]::Max(2, $Ctrl.Height)
+        $d = [Math]::Min(($Radius * 2), [Math]::Min($w, $h))
+        $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+        [void]$path.AddArc(0, 0, $d, $d, 180, 90)
+        [void]$path.AddArc(($w - $d - 1), 0, $d, $d, 270, 90)
+        [void]$path.AddArc(($w - $d - 1), ($h - $d - 1), $d, $d, 0, 90)
+        [void]$path.AddArc(0, ($h - $d - 1), $d, $d, 90, 90)
+        $path.CloseFigure()
+        $old = $Ctrl.Region
+        $Ctrl.Region = New-Object System.Windows.Forms.Region $path
+        if ($old) { $old.Dispose() }
+        $path.Dispose()
+    } catch { }
+}
+
+function Add-RoundRegionTracking {
+    param($Ctrl, [int]$Radius)
+    Set-RoundRegion $Ctrl $Radius
+    $Ctrl.Add_Resize({ param($s, $e) Set-RoundRegion $s $Radius }.GetNewClosure())
+}
+
+function New-GlyphLabel {
+    param([string]$Hex, [single]$SizePt, $Color)
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = Get-Mdl2Char $Hex
+    $lbl.Font = New-Object System.Drawing.Font("Segoe MDL2 Assets", $SizePt)
+    $lbl.ForeColor = $Color
+    $lbl.BackColor = [System.Drawing.Color]::Transparent
+    $lbl.TextAlign = "MiddleCenter"
+    $lbl.Dock = "Fill"
+    $lbl.Enabled = $false
+    return $lbl
+}
+
+# Pill-shaped chip that renders its own text; Text/ForeColor stay assignable
+function New-ChipLabel {
+    param([string]$Text, [int]$Width, $Color, [string]$FontName = "Segoe UI Semibold", [single]$Pt = 8.75)
+    $p = New-Object System.Windows.Forms.Panel
+    $p.Size = New-Object System.Drawing.Size($Width, 26)
+    $p.Text = $Text
+    $p.ForeColor = $Color
+    $p.BackColor = [System.Drawing.Color]::Transparent
+    Enable-DoubleBuffer $p
+    $p.Add_Paint({
+        param($sender, $e)
+        try {
+            $g = $e.Graphics
+            $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+            $c = $sender.ForeColor
+            $rect = New-Object System.Drawing.Rectangle(1, 1, ($sender.Width - 3), ($sender.Height - 3))
+            $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+            $dd = 12
+            [void]$path.AddArc($rect.X, $rect.Y, $dd, $dd, 180, 90)
+            [void]$path.AddArc((($rect.X + $rect.Width) - $dd), $rect.Y, $dd, $dd, 270, 90)
+            [void]$path.AddArc((($rect.X + $rect.Width) - $dd), (($rect.Y + $rect.Height) - $dd), $dd, $dd, 0, 90)
+            [void]$path.AddArc($rect.X, (($rect.Y + $rect.Height) - $dd), $dd, $dd, 90, 90)
+            $path.CloseFigure()
+            $fill = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(24, $c.R, $c.G, $c.B))
+            $g.FillPath($fill, $path)
+            $fill.Dispose()
+            $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(90, $c.R, $c.G, $c.B)), 1
+            $g.DrawPath($pen, $path)
+            $pen.Dispose()
+            $path.Dispose()
+            $font = New-Object System.Drawing.Font($FontName, $Pt)
+            $mode = New-Object System.Drawing.StringFormat
+            $mode.Alignment = [System.Drawing.StringAlignment]::Center
+            $mode.LineAlignment = [System.Drawing.StringAlignment]::Center
+            $tb = New-Object System.Drawing.Rectangle(6, 0, ($sender.Width - 12), $sender.Height)
+            [System.Windows.Forms.TextRenderer]::DrawText($g, $sender.Text, $font, $tb, $sender.ForeColor)
+            $font.Dispose()
+            $mode.Dispose()
+        } catch { }
+    }.GetNewClosure())
+    return $p
+}
+
 function Add-PanelBorder {
-    param($Panel, $Color = $null, [int]$Width = 1)
-    if ($Color) {
-        $Panel.Tag = $Color
-    }
+    param($Panel, $Color = $null, [int]$Width = 1, [int]$Radius = 12)
+    if (-not $Color) { $Color = $Script:Theme.Border }
+    $Panel.Tag = @{ Color = $Color; Radius = $Radius }
+    Add-RoundRegionTracking $Panel $Radius
     $Panel.Add_Paint({
         param($sender, $e)
-        $c = if ($sender.Tag -is [System.Drawing.Color]) { $sender.Tag } else { $Script:Theme.Border }
-        $pen = New-Object System.Drawing.Pen $c, $Width
-        $rect = New-Object System.Drawing.Rectangle 0, 0, ($sender.Width - 1), ($sender.Height - 1)
-        $e.Graphics.DrawRectangle($pen, $rect)
-        $pen.Dispose()
+        try {
+            $meta = $sender.Tag
+            if ($meta -is [System.Drawing.Color]) { $meta = @{ Color = $meta; Radius = 0 } }
+            $c = if ($meta.Color) { $meta.Color } else { $Script:Theme.Border }
+            $g = $e.Graphics
+            $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+            $w = $sender.Width
+            $h = $sender.Height
+            $r = if ($meta.Radius) { [int]$meta.Radius } else { 0 }
+            if ($r -gt 0) {
+                $rect = New-Object System.Drawing.Rectangle(0, 0, ($w - 1), ($h - 1))
+                $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+                $d = [Math]::Min($r * 2, [Math]::Min($rect.Width, $rect.Height))
+                [void]$path.AddArc($rect.X, $rect.Y, $d, $d, 180, 90)
+                [void]$path.AddArc((($rect.X + $rect.Width) - $d), $rect.Y, $d, $d, 270, 90)
+                [void]$path.AddArc((($rect.X + $rect.Width) - $d), (($rect.Y + $rect.Height) - $d), $d, $d, 0, 90)
+                [void]$path.AddArc($rect.X, (($rect.Y + $rect.Height) - $d), $d, $d, 90, 90)
+                $path.CloseFigure()
+                $pen = New-Object System.Drawing.Pen $c, $Width
+                $g.DrawPath($pen, $path)
+                $pen.Dispose()
+                $path.Dispose()
+            } else {
+                $pen = New-Object System.Drawing.Pen $c, $Width
+                $rect2 = New-Object System.Drawing.Rectangle(0, 0, ($w - 1), ($h - 1))
+                $g.DrawRectangle($pen, $rect2)
+                $pen.Dispose()
+            }
+        } catch { }
     })
 }
 
@@ -101,24 +226,23 @@ function New-PremiumButton {
         }
         'Primary' {
             $b.BackColor = $t.Accent
-            $b.ForeColor = [System.Drawing.Color]::FromArgb(10, 20, 24)
-            $b.FlatAppearance.MouseOverBackColor = $t.AccentDim
+            $b.ForeColor = [System.Drawing.Color]::FromArgb(6, 14, 24)
+            $b.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(103, 232, 249)
+            $b.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
         }
         'Ghost' {
             $b.BackColor = $t.BtnGhost
             $b.ForeColor = $t.Accent
-            $b.FlatAppearance.BorderSize = 1
-            $b.FlatAppearance.BorderColor = $t.Accent
             $b.FlatAppearance.MouseOverBackColor = $t.PanelAlt
         }
         'Danger' {
-            $b.BackColor = $t.Danger
-            $b.ForeColor = $t.Text
-            $b.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(160, 50, 50)
+            $b.BackColor = [System.Drawing.Color]::FromArgb(90, 26, 42)
+            $b.ForeColor = $t.Danger
+            $b.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(120, 34, 54)
         }
         'Muted' {
             $b.BackColor = $t.PanelAlt
-            $b.ForeColor = $t.Text
+            $b.ForeColor = $t.Muted
             $b.FlatAppearance.MouseOverBackColor = $t.Border
         }
         default {
@@ -126,6 +250,32 @@ function New-PremiumButton {
             $b.ForeColor = $t.Text
         }
     }
+    if ($Style -eq 'Ghost') {
+        $accent = $t.Accent
+        $b.Add_Paint({
+            param($sender, $e)
+            try {
+                $g = $e.Graphics
+                $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+                $w = $sender.Width
+                $h = $sender.Height
+                $r2 = 9 * 2
+                if ($r2 -gt $w) { $r2 = $w }
+                if ($r2 -gt $h) { $r2 = $h }
+                $path2 = New-Object System.Drawing.Drawing2D.GraphicsPath
+                [void]$path2.AddArc(0, 0, $r2, $r2, 180, 90)
+                [void]$path2.AddArc(($w - $r2 - 1), 0, $r2, $r2, 270, 90)
+                [void]$path2.AddArc(($w - $r2 - 1), ($h - $r2 - 1), $r2, $r2, 0, 90)
+                [void]$path2.AddArc(0, ($h - $r2 - 1), $r2, $r2, 90, 90)
+                $path2.CloseFigure()
+                $pen2 = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(120, $accent.R, $accent.G, $accent.B)), 1
+                $g.DrawPath($pen2, $path2)
+                $pen2.Dispose()
+                $path2.Dispose()
+        } catch { }
+    })
+    }
+    Add-RoundRegionTracking $b 9
     return $b
 }
 
@@ -154,14 +304,31 @@ function New-CardPanel {
     if ($Dock -ne [System.Windows.Forms.DockStyle]::None) {
         $p.Dock = $Dock
     }
-    Add-PanelBorder $p $t.Border
+    Add-PanelBorder $p $t.Border -Radius 12
     if ($Title) {
+        $tick = New-Object System.Windows.Forms.Panel
+        $tick.Location = New-Object System.Drawing.Point(16, 13)
+        $tick.Size = New-Object System.Drawing.Size(4, 18)
+        $tick.BackColor = $t.Accent
+        Enable-DoubleBuffer $tick
+        $tick.Add_Paint({
+            param($sender, $e)
+            try {
+                $g = $e.Graphics
+                $rectT = New-Object System.Drawing.Rectangle(0, 0, $sender.Width, $sender.Height)
+                $brT = New-Object System.Drawing.Drawing2D.LinearGradientBrush $rectT, $Script:Theme.Accent, $Script:Theme.Accent2, 90
+                $g.FillRectangle($brT, $rectT)
+                $brT.Dispose()
+            } catch { }
+        })
+        $p.Controls.Add($tick)
         $lbl = New-Object System.Windows.Forms.Label
         $lbl.Text = $Title
         $lbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 11)
         $lbl.ForeColor = $t.Text
         $lbl.AutoSize = $true
-        $lbl.Location = New-Object System.Drawing.Point(16, 12)
+        $lbl.BackColor = [System.Drawing.Color]::Transparent
+        $lbl.Location = New-Object System.Drawing.Point(30, 12)
         $p.Controls.Add($lbl)
     }
     return $p
@@ -174,7 +341,7 @@ function New-MetricCard {
     )
     $t = $Script:Theme
     $card = New-Object System.Windows.Forms.Panel
-    $card.Height = 82
+    $card.Height = 86
     $card.Dock = "Top"
     $card.Padding = New-Object System.Windows.Forms.Padding(0, 0, 0, 10)
     $card.BackColor = $t.Bg
@@ -183,38 +350,51 @@ function New-MetricCard {
     $inner = New-Object System.Windows.Forms.Panel
     $inner.Dock = "Fill"
     $inner.BackColor = $t.Panel
-    Add-PanelBorder $inner $t.Border
+    Add-PanelBorder $inner $t.Border -Radius 12
     Enable-DoubleBuffer $inner
+
+    # Left neon energy strip (cyan -> violet)
+    $inner.Add_Paint({
+        param($sender, $e)
+        try {
+            $g = $e.Graphics
+            $rectS = New-Object System.Drawing.Rectangle(1, 10, 3, ($sender.Height - 20))
+            if ($rectS.Height -gt 2) {
+                $brS = New-Object System.Drawing.Drawing2D.LinearGradientBrush $rectS, $Script:Theme.Accent, $Script:Theme.Accent2, 90
+                $g.FillRectangle($brS, $rectS)
+                $brS.Dispose()
+            }
+        } catch { }
+    })
     $card.Controls.Add($inner)
 
     $iconBox = New-Object System.Windows.Forms.Panel
-    $iconBox.Location = New-Object System.Drawing.Point(14, 14)
-    $iconBox.Size = New-Object System.Drawing.Size(44, 44)
+    $iconBox.Location = New-Object System.Drawing.Point(18, 20)
+    $iconBox.Size = New-Object System.Drawing.Size(46, 46)
     $iconBox.BackColor = $t.IconBox
-    Add-PanelBorder $iconBox $t.Border
+    $iconBox.Padding = New-Object System.Windows.Forms.Padding(2)
+    Add-PanelBorder $iconBox ([System.Drawing.Color]::FromArgb(70, $t.Accent.R, $t.Accent.G, $t.Accent.B)) -Radius 10
+    $iconGlyph = New-GlyphLabel $Glyph 13 $t.Accent
+    $iconBox.Controls.Add($iconGlyph)
     $inner.Controls.Add($iconBox)
 
-    $accentDot = New-Object System.Windows.Forms.Panel
-    $accentDot.Size = New-Object System.Drawing.Size(14, 14)
-    $accentDot.Location = New-Object System.Drawing.Point(15, 15)
-    $accentDot.BackColor = $t.Accent
-    $iconBox.Controls.Add($accentDot)
-
     $titleLbl = New-Object System.Windows.Forms.Label
-    $titleLbl.Text = $Title
-    $titleLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 8.5)
+    $titleLbl.Text = $Title.ToUpperInvariant()
+    $titleLbl.Font = New-Object System.Drawing.Font("Segoe UI", 8)
     $titleLbl.ForeColor = $t.Muted
     $titleLbl.AutoSize = $true
-    $titleLbl.Location = New-Object System.Drawing.Point(72, 10)
+    $titleLbl.BackColor = [System.Drawing.Color]::Transparent
+    $titleLbl.Location = New-Object System.Drawing.Point(80, 14)
     $inner.Controls.Add($titleLbl)
 
     $mainLbl = New-Object System.Windows.Forms.Label
     $mainLbl.Text = "-"
-    $mainLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
+    $mainLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 11)
     $mainLbl.ForeColor = $t.Text
-    $mainLbl.Location = New-Object System.Drawing.Point(72, 28)
-    $mainLbl.Size = New-Object System.Drawing.Size(280, 36)
+    $mainLbl.Location = New-Object System.Drawing.Point(78, 32)
+    $mainLbl.Size = New-Object System.Drawing.Size(280, 42)
     $mainLbl.Anchor = "Top,Left,Right"
+    $mainLbl.BackColor = [System.Drawing.Color]::Transparent
     $inner.Controls.Add($mainLbl)
 
     $statLbl = New-Object System.Windows.Forms.Label
@@ -222,24 +402,11 @@ function New-MetricCard {
     $statLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5)
     $statLbl.ForeColor = $t.Accent
     $statLbl.TextAlign = "MiddleRight"
-    $statLbl.Location = New-Object System.Drawing.Point(360, 18)
-    $statLbl.Size = New-Object System.Drawing.Size(160, 36)
+    $statLbl.Location = New-Object System.Drawing.Point(360, 26)
+    $statLbl.Size = New-Object System.Drawing.Size(170, 30)
     $statLbl.Anchor = "Top,Right"
+    $statLbl.BackColor = [System.Drawing.Color]::Transparent
     $inner.Controls.Add($statLbl)
-
-    $inner.Add_Resize({
-        param($sender, $e)
-        foreach ($ctrl in $sender.Controls) {
-            if ($ctrl -is [System.Windows.Forms.Label] -and $ctrl.Anchor -band [System.Windows.Forms.AnchorStyles]::Right -and $ctrl.Anchor -band [System.Windows.Forms.AnchorStyles]::Left) {
-                # main label handled by Anchor
-            }
-        }
-        $right = $sender.Controls | Where-Object { $_.Anchor -eq ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right) } | Select-Object -First 1
-        $mid = $sender.Controls | Where-Object { $_.Font -and $_.Font.Size -eq 10 -and $_.Location.X -eq 72 } | Select-Object -First 1
-        if ($right -and $mid) {
-            $mid.Width = [math]::Max(120, $right.Left - $mid.Left - 12)
-        }
-    })
 
     return [pscustomobject]@{
         Panel = $card
@@ -261,24 +428,22 @@ function New-GameStatusRow {
     Enable-DoubleBuffer $row
 
     $iconBox = New-Object System.Windows.Forms.Panel
-    $iconBox.Location = New-Object System.Drawing.Point(8, 8)
-    $iconBox.Size = New-Object System.Drawing.Size(36, 36)
+    $iconBox.Location = New-Object System.Drawing.Point(10, 9)
+    $iconBox.Size = New-Object System.Drawing.Size(34, 34)
     $iconBox.BackColor = $t.IconBox
-    Add-PanelBorder $iconBox $t.Border
+    $iconBox.Padding = New-Object System.Windows.Forms.Padding(2)
+    Add-PanelBorder $iconBox ([System.Drawing.Color]::FromArgb(70, $t.Accent2.R, $t.Accent2.G, $t.Accent2.B)) -Radius 9
+    $iconGlyph = New-GlyphLabel $Glyph 11 $t.Accent2
+    $iconBox.Controls.Add($iconGlyph)
     $row.Controls.Add($iconBox)
-
-    $accentDot = New-Object System.Windows.Forms.Panel
-    $accentDot.Size = New-Object System.Drawing.Size(10, 10)
-    $accentDot.Location = New-Object System.Drawing.Point(13, 13)
-    $accentDot.BackColor = $t.Accent
-    $iconBox.Controls.Add($accentDot)
 
     $titleLbl = New-Object System.Windows.Forms.Label
     $titleLbl.Text = $Title
     $titleLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
     $titleLbl.ForeColor = $t.Text
     $titleLbl.AutoSize = $true
-    $titleLbl.Location = New-Object System.Drawing.Point(56, 16)
+    $titleLbl.BackColor = [System.Drawing.Color]::Transparent
+    $titleLbl.Location = New-Object System.Drawing.Point(58, 16)
     $row.Controls.Add($titleLbl)
 
     $valLbl = New-Object System.Windows.Forms.Label
@@ -287,15 +452,33 @@ function New-GameStatusRow {
     $valLbl.ForeColor = $t.Muted
     $valLbl.TextAlign = "MiddleRight"
     $valLbl.Location = New-Object System.Drawing.Point(300, 14)
-    $valLbl.Size = New-Object System.Drawing.Size(200, 24)
+    $valLbl.Size = New-Object System.Drawing.Size(230, 24)
     $valLbl.Anchor = "Top,Right"
+    $valLbl.BackColor = [System.Drawing.Color]::Transparent
+    # LED dot rendered from live ForeColor so status color changes update it too
+    $valLbl.Add_Paint({
+        param($sender, $e)
+        try {
+            $g = $e.Graphics
+            $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+            $c = $sender.ForeColor
+            $brL = New-Object System.Drawing.SolidBrush $c
+            $g.FillEllipse($brL, 2, 8, 8, 8)
+            $brL.Dispose()
+            $glow = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(60, $c.R, $c.G, $c.B)), 3
+            $g.DrawEllipse($glow, 1, 7, 10, 10)
+            $glow.Dispose()
+        } catch { }
+    })
     $row.Controls.Add($valLbl)
 
     $row.Add_Paint({
         param($sender, $e)
-        $pen = New-Object System.Drawing.Pen $Script:Theme.Border, 1
-        $e.Graphics.DrawLine($pen, 8, ($sender.Height - 1), ($sender.Width - 8), ($sender.Height - 1))
-        $pen.Dispose()
+        try {
+            $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(140, $Script:Theme.Border.R, $Script:Theme.Border.G, $Script:Theme.Border.B)), 1
+            $e.Graphics.DrawLine($pen, 58, ($sender.Height - 1), ($sender.Width - 12), ($sender.Height - 1))
+            $pen.Dispose()
+        } catch { }
     })
 
     return [pscustomobject]@{
@@ -310,6 +493,7 @@ function Set-ActiveNav([string]$Name) {
         $btn = $Script:NavButtons[$key]
         $isActive = ($key -eq $Name)
         $btn.ForeColor = if ($isActive) { $t.Accent } else { $t.Muted }
+        $btn.BackColor = if ($isActive) { $t.PanelAlt } else { $t.Header }
         $btn.Tag = if ($isActive) { "active" } else { "idle" }
         $btn.Invalidate()
     }
@@ -355,12 +539,12 @@ function Drain-UiEventQueue {
                 if (-not $box) { break }
                 $ColorName = $item.Color
                 $color = switch ($ColorName) {
-                    'Green'  { [System.Drawing.Color]::FromArgb(80, 200, 120) }
-                    'Yellow' { [System.Drawing.Color]::FromArgb(230, 180, 60) }
-                    'Red'    { [System.Drawing.Color]::FromArgb(230, 90, 90) }
-                    'Cyan'   { [System.Drawing.Color]::FromArgb(80, 190, 220) }
-                    'Gray'   { [System.Drawing.Color]::FromArgb(140, 150, 160) }
-                    default  { [System.Drawing.Color]::FromArgb(220, 225, 230) }
+                    'Green'  { [System.Drawing.Color]::FromArgb(52, 211, 153) }
+                    'Yellow' { [System.Drawing.Color]::FromArgb(251, 191, 36) }
+                    'Red'    { [System.Drawing.Color]::FromArgb(251, 113, 133) }
+                    'Cyan'   { [System.Drawing.Color]::FromArgb(34, 211, 238) }
+                    'Gray'   { [System.Drawing.Color]::FromArgb(120, 140, 175) }
+                    default  { [System.Drawing.Color]::FromArgb(210, 222, 240) }
                 }
                 $stamp = Get-Date -Format "HH:mm:ss"
                 $box.SelectionStart = $box.TextLength
@@ -420,7 +604,6 @@ function Invoke-GuiAction {
     Set-UiProgressValue 0
     Set-UiStatusText $Title
     Update-GuiStatusBar -JobText $Title
-    Ensure-SessionLog
     # Paint Stop/disabled buttons before long work (DoEvents keeps Cancel responsive later)
     Pump-Ui
 
@@ -550,6 +733,7 @@ function Show-MaintenanceGui {
     Add-Type -AssemblyName System.Drawing
     [System.Windows.Forms.Application]::EnableVisualStyles()
 
+
     $Script:Theme = Get-GuiTheme
     $t = $Script:Theme
     $Script:ContentPanels = @{}
@@ -568,6 +752,7 @@ function Show-MaintenanceGui {
     $form.MinimumSize = New-Object System.Drawing.Size(980, 720)
     Enable-DoubleBuffer $form
 
+
     # ---- HEADER (Dock Top) ----
     $header = New-Object System.Windows.Forms.Panel
     $header.Dock = "Top"
@@ -576,41 +761,126 @@ function Show-MaintenanceGui {
     Enable-DoubleBuffer $header
     $form.Controls.Add($header)
 
-    $brand = New-Object System.Windows.Forms.Label
-    $brand.Text = "PC Maintenance Kit"
-    $brand.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 15)
-    $brand.ForeColor = $t.Text
-    $brand.AutoSize = $true
-    $brand.Location = New-Object System.Drawing.Point(24, 14)
-    $header.Controls.Add($brand)
-
-    $ver = New-Object System.Windows.Forms.Label
-    $ver.Text = "v$($Script:AppVersion)  -  Gamer Toolkit"
-    $ver.ForeColor = $t.Accent
-    $ver.AutoSize = $true
-    $ver.Location = New-Object System.Drawing.Point(26, 42)
-    $header.Controls.Add($ver)
-
+    # Hidden state holders - text/colors rendered by header paint as neon chips
     $freeLbl = New-Object System.Windows.Forms.Label
     $freeLbl.Text = "C: free -"
     $freeLbl.ForeColor = $t.Accent
-    $freeLbl.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5)
-    $freeLbl.AutoSize = $true
-    $freeLbl.Anchor = "Top,Right"
-    $freeLbl.Location = New-Object System.Drawing.Point(($header.Width - 220), 16)
-    $header.Controls.Add($freeLbl)
+    $freeLbl.Visible = $false
 
     $rebootBadge = New-Object System.Windows.Forms.Label
     $rebootBadge.Text = "..."
-    $rebootBadge.AutoSize = $true
-    $rebootBadge.Anchor = "Top,Right"
-    $rebootBadge.Location = New-Object System.Drawing.Point(($header.Width - 220), 40)
-    $header.Controls.Add($rebootBadge)
+    $rebootBadge.ForeColor = $t.Muted
+    $rebootBadge.Visible = $false
 
-    $header.Add_Resize({
+    $header.Tag = @{ Free = $freeLbl; Reboot = $rebootBadge; Theme = $t }
+
+    $Script:NavGlyphs = @{
+        Home    = 'E80F'
+        Cleanup = 'E74D'
+        Updates = 'E895'
+        Gaming  = 'E7FC'
+        Repair  = 'E90F'
+        Device  = 'E7F4'
+    }
+
+    $brandTile = New-Object System.Windows.Forms.Panel
+    $brandTile.Location = New-Object System.Drawing.Point(24, 14)
+    $brandTile.Size = New-Object System.Drawing.Size(46, 46)
+    $brandTile.BackColor = $t.IconBox
+    Add-PanelBorder $brandTile ([System.Drawing.Color]::FromArgb(90, $t.Accent.R, $t.Accent.G, $t.Accent.B)) -Radius 12
+    $brandTile.Add_Paint({
         param($sender, $e)
-        $freeLbl.Left = [math]::Max(700, $sender.ClientSize.Width - 220)
-        $rebootBadge.Left = [math]::Max(700, $sender.ClientSize.Width - 220)
+        try {
+            $g = $e.Graphics
+            $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+            $fontB = New-Object System.Drawing.Font("Segoe MDL2 Assets", 15)
+            [System.Windows.Forms.TextRenderer]::DrawText($g, (Get-Mdl2Char 'E90F'), $fontB, (New-Object System.Drawing.Rectangle(0, 0, $sender.Width, $sender.Height)), $Script:Theme.Accent, ([System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::HorizontalCenter))
+            $fontB.Dispose()
+        } catch { }
+    })
+    $header.Controls.Add($brandTile)
+
+    $brand = New-Object System.Windows.Forms.Label
+    $brand.Text = "PC MAINTENANCE KIT"
+    $brand.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 14.5)
+    $brand.ForeColor = $t.Text
+    $brand.AutoSize = $true
+    $brand.BackColor = [System.Drawing.Color]::Transparent
+    $brand.Location = New-Object System.Drawing.Point(84, 13)
+    $header.Controls.Add($brand)
+
+    $ver = New-Object System.Windows.Forms.Label
+    $ver.Text = "v$($Script:AppVersion)   |   GAMER TOOLKIT"
+    $ver.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 8.5)
+    $ver.ForeColor = $t.Muted
+    $ver.AutoSize = $true
+    $ver.BackColor = [System.Drawing.Color]::Transparent
+    $ver.Location = New-Object System.Drawing.Point(86, 42)
+    $header.Controls.Add($ver)
+
+    $header.Add_Paint({
+        param($sender, $e)
+        try {
+            $g = $e.Graphics
+            $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+            $w = $sender.ClientSize.Width
+            $h = $sender.ClientSize.Height
+            $t = $sender.Tag.Theme
+            $bgRect = New-Object System.Drawing.Rectangle(0, 0, $w, $h)
+            $brBg = New-Object System.Drawing.Drawing2D.LinearGradientBrush $bgRect, $t.Header, $t.Bg, [float]90
+            $g.FillRectangle($brBg, $bgRect)
+            $brBg.Dispose()
+
+            # Neon glow orbs
+            $orb1Rect = New-Object System.Drawing.Rectangle(-70, -110, 300, 300)
+            $brO1 = New-Object System.Drawing.Drawing2D.LinearGradientBrush $orb1Rect, [System.Drawing.Color]::FromArgb(28, $t.Accent.R, $t.Accent.G, $t.Accent.B), [System.Drawing.Color]::FromArgb(0, $t.Accent.R, $t.Accent.G, $t.Accent.B), [float]45
+            $g.FillEllipse($brO1, $orb1Rect)
+            $brO1.Dispose()
+            $orb2Rect = New-Object System.Drawing.Rectangle(($w - 230), -120, 320, 320)
+            $brO2 = New-Object System.Drawing.Drawing2D.LinearGradientBrush $orb2Rect, [System.Drawing.Color]::FromArgb(30, $t.Accent2.R, $t.Accent2.G, $t.Accent2.B), [System.Drawing.Color]::FromArgb(0, $t.Accent2.R, $t.Accent2.G, $t.Accent2.B), [float]315
+            $g.FillEllipse($brO2, $orb2Rect)
+            $brO2.Dispose()
+
+            # Bottom energy line (cyan -> violet fade)
+            $lineRect = New-Object System.Drawing.Rectangle(0, ($h - 2), $w, 2)
+            $brL = New-Object System.Drawing.Drawing2D.LinearGradientBrush $lineRect, $t.Accent, $t.Accent2, [float]0
+            $g.FillRectangle($brL, $lineRect)
+            $brL.Dispose()
+
+            # Status chips (top-right)
+            $chipFont = New-Object System.Drawing.Font("Segoe UI Semibold", 8.75)
+            $modeC = New-Object System.Drawing.StringFormat
+            $modeC.Alignment = [System.Drawing.StringAlignment]::Center
+            $modeC.LineAlignment = [System.Drawing.StringAlignment]::Center
+
+            foreach ($chip in @(@{ Src = $sender.Tag.Free; Y = 18; W = 148 }, @{ Src = $sender.Tag.Reboot; Y = 50; W = 172 })) {
+                $src = $chip.Src
+                if (-not $src -or -not $src.Text) { continue }
+                $cw = $chip.W
+                $cx = $w - 24 - $cw
+                $cy = $chip.Y
+                $rectC = New-Object System.Drawing.Rectangle($cx, $cy, $cw, 26)
+                $pathC = New-Object System.Drawing.Drawing2D.GraphicsPath
+                $dC = 24
+                [void]$pathC.AddArc($rectC.X, $rectC.Y, $dC, $dC, 180, 90)
+                [void]$pathC.AddArc((($rectC.X + $rectC.Width) - $dC), $rectC.Y, $dC, $dC, 270, 90)
+                [void]$pathC.AddArc((($rectC.X + $rectC.Width) - $dC), (($rectC.Y + $rectC.Height) - $dC), $dC, $dC, 0, 90)
+                [void]$pathC.AddArc($rectC.X, (($rectC.Y + $rectC.Height) - $dC), $dC, $dC, 90, 90)
+                $pathC.CloseFigure()
+                $cc = $src.ForeColor
+                $fillC = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(22, $cc.R, $cc.G, $cc.B))
+                $g.FillPath($fillC, $pathC)
+                $fillC.Dispose()
+                $penC = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(80, $cc.R, $cc.G, $cc.B)), 1
+                $g.DrawPath($penC, $pathC)
+                $penC.Dispose()
+                $pathC.Dispose()
+                $tbC = New-Object System.Drawing.Rectangle(($rectC.X + 6), $rectC.Y, ($rectC.Width - 12), $rectC.Height)
+                [System.Windows.Forms.TextRenderer]::DrawText($g, $src.Text, $chipFont, $tbC, $cc, $modeC)
+            }
+            $chipFont.Dispose()
+            $modeC.Dispose()
+        } catch { }
     })
 
     $navNames = @('Home','Cleanup','Updates','Gaming','Repair','Device')
@@ -618,8 +888,8 @@ function Show-MaintenanceGui {
     foreach ($name in $navNames) {
         $nb = New-Object System.Windows.Forms.Button
         $nb.Text = $name
-        $nb.Location = New-Object System.Drawing.Point($navX, 70)
-        $nb.Size = New-Object System.Drawing.Size(100, 36)
+        $nb.Location = New-Object System.Drawing.Point($navX, 66)
+        $nb.Size = New-Object System.Drawing.Size(108, 38)
         $nb.FlatStyle = "Flat"
         $nb.FlatAppearance.BorderSize = 0
         $nb.BackColor = $t.Header
@@ -627,24 +897,45 @@ function Show-MaintenanceGui {
         $nb.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9.5)
         $nb.Cursor = [System.Windows.Forms.Cursors]::Hand
         $nb.Tag = "idle"
-        $nb.TextAlign = "MiddleCenter"
+        $nb.TextAlign = "MiddleLeft"
+        $nb.Padding = New-Object System.Windows.Forms.Padding(34, 0, 0, 0)
         $nb.Add_Click({
             param($sender, $e)
             Set-ActiveNav ([string]$sender.Text)
         })
+        $nb.Add_MouseEnter({
+            param($sender, $e)
+            if ($sender.Tag -ne "active") { $sender.BackColor = $Script:Theme.PanelAlt; $sender.Invalidate() }
+        })
+        $nb.Add_MouseLeave({
+            param($sender, $e)
+            if ($sender.Tag -ne "active") { $sender.BackColor = $Script:Theme.Header; $sender.Invalidate() }
+        })
         $nb.Add_Paint({
             param($sender, $e)
-            if ($sender.Tag -eq "active") {
-                $pen = New-Object System.Drawing.Pen $Script:Theme.Accent, 3
-                $y = $sender.Height - 2
-                $e.Graphics.DrawLine($pen, 10, $y, ($sender.Width - 10), $y)
-                $pen.Dispose()
-            }
+            try {
+                $g = $e.Graphics
+                $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+                $glyphCode = $Script:NavGlyphs[[string]$sender.Text]
+                if ($glyphCode) {
+                    $fontG = New-Object System.Drawing.Font("Segoe MDL2 Assets", 10.5)
+                    [System.Windows.Forms.TextRenderer]::DrawText($g, (Get-Mdl2Char $glyphCode), $fontG, (New-Object System.Drawing.Rectangle(11, 0, 22, $sender.Height)), $sender.ForeColor, ([System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::HorizontalCenter))
+                    $fontG.Dispose()
+                }
+                if ($sender.Tag -eq "active") {
+                    $rectU = New-Object System.Drawing.Rectangle(12, ($sender.Height - 6), ($sender.Width - 24), 3)
+                    $brU = New-Object System.Drawing.Drawing2D.LinearGradientBrush $rectU, $Script:Theme.Accent, $Script:Theme.Accent2, 0
+                    $g.FillRectangle($brU, $rectU)
+                    $brU.Dispose()
+                }
+            } catch { }
         })
+        Add-RoundRegionTracking $nb 8
         $header.Controls.Add($nb)
         $Script:NavButtons[$name] = $nb
-        $navX += 104
+        $navX += 112
     }
+
 
     # ---- FOOTER HOST (Dock Bottom) ----
     $footerHost = New-Object System.Windows.Forms.Panel
@@ -657,7 +948,8 @@ function Show-MaintenanceGui {
     $logCard = New-Object System.Windows.Forms.Panel
     $logCard.Dock = "Fill"
     $logCard.BackColor = $t.Panel
-    Add-PanelBorder $logCard $t.Accent
+    Add-PanelBorder $logCard ([System.Drawing.Color]::FromArgb(150, $t.Border.R, $t.Border.G, $t.Border.B)) -Radius 14
+    $logCard.Padding = New-Object System.Windows.Forms.Padding(1)
     $footerHost.Controls.Add($logCard)
 
     $logTop = New-Object System.Windows.Forms.Panel
@@ -667,7 +959,7 @@ function Show-MaintenanceGui {
     $logCard.Controls.Add($logTop)
 
     $logTitle = New-Object System.Windows.Forms.Label
-    $logTitle.Text = "Maintenance Log"
+    $logTitle.Text = "Activity"
     $logTitle.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
     $logTitle.ForeColor = $t.Accent
     $logTitle.AutoSize = $true
@@ -675,7 +967,7 @@ function Show-MaintenanceGui {
     $logTop.Controls.Add($logTitle)
 
     $btnClearLog = New-Object System.Windows.Forms.LinkLabel
-    $btnClearLog.Text = "Clear log"
+    $btnClearLog.Text = "Clear"
     $btnClearLog.LinkColor = $t.Accent
     $btnClearLog.ActiveLinkColor = $t.Text
     $btnClearLog.AutoSize = $true
@@ -695,17 +987,15 @@ function Show-MaintenanceGui {
 
     $btnCluster = New-Object System.Windows.Forms.Panel
     $btnCluster.Dock = "Right"
-    $btnCluster.Width = 240
+    $btnCluster.Width = 168
     $btnCluster.BackColor = $t.Panel
     $logBottom.Controls.Add($btnCluster)
 
-    $btnLogs = New-PremiumButton "View Full Log" (New-Object System.Drawing.Point(8, 12)) (New-Object System.Drawing.Size(100, 32)) "Muted"
-    $btnStop = New-PremiumButton "Stop" (New-Object System.Drawing.Point(112, 12)) (New-Object System.Drawing.Size(52, 32)) "Danger"
+    $btnStop = New-PremiumButton "Stop" (New-Object System.Drawing.Point(8, 12)) (New-Object System.Drawing.Size(52, 32)) "Danger"
     $btnStop.Enabled = $false
-    $btnCli = New-PremiumButton "CLI" (New-Object System.Drawing.Point(168, 12)) (New-Object System.Drawing.Size(44, 32)) "Muted"
-    $btnQuit = New-PremiumButton "Quit" (New-Object System.Drawing.Point(216, 12)) (New-Object System.Drawing.Size(46, 32)) "Danger"
-    $btnCluster.Width = 270
-    $btnCluster.Controls.AddRange(@($btnLogs, $btnStop, $btnCli, $btnQuit))
+    $btnCli = New-PremiumButton "CLI" (New-Object System.Drawing.Point(64, 12)) (New-Object System.Drawing.Size(44, 32)) "Muted"
+    $btnQuit = New-PremiumButton "Quit" (New-Object System.Drawing.Point(112, 12)) (New-Object System.Drawing.Size(46, 32)) "Danger"
+    $btnCluster.Controls.AddRange(@($btnStop, $btnCli, $btnQuit))
 
     $progArea = New-Object System.Windows.Forms.Panel
     $progArea.Dock = "Fill"
@@ -717,12 +1007,26 @@ function Show-MaintenanceGui {
     $progressTrack.Dock = "Top"
     $progressTrack.Height = 12
     $progressTrack.BackColor = $t.IconBox
+    Add-RoundRegionTracking $progressTrack 6
     $progArea.Controls.Add($progressTrack)
 
     $progressFill = New-Object System.Windows.Forms.Panel
     $progressFill.Location = New-Object System.Drawing.Point(0, 0)
     $progressFill.Size = New-Object System.Drawing.Size(0, 12)
     $progressFill.BackColor = $t.Accent
+    Add-RoundRegionTracking $progressFill 6
+    # Cyan -> violet energy gradient; repaints as width grows during runs
+    $progressFill.Add_Paint({
+        param($sender, $e)
+        try {
+            if ($sender.Width -le 1) { return }
+            $g = $e.Graphics
+            $rectP = New-Object System.Drawing.Rectangle(0, 0, $sender.Width, $sender.Height)
+            $brP = New-Object System.Drawing.Drawing2D.LinearGradientBrush $rectP, $Script:Theme.Accent, $Script:Theme.Accent2, 0
+            $g.FillRectangle($brP, $rectP)
+            $brP.Dispose()
+        } catch { }
+    })
     $progressTrack.Controls.Add($progressFill)
 
     $progress = New-Object System.Windows.Forms.ProgressBar
@@ -793,6 +1097,7 @@ function Show-MaintenanceGui {
     $progressTrack.Add_Resize({
         Set-UiProgressValue $Script:LastProgressPct
     })
+
 
     # ---- CONTENT HOST (Dock Fill) ----
     $hostPanel = New-Object System.Windows.Forms.Panel
@@ -1135,6 +1440,7 @@ function Show-MaintenanceGui {
         $devTip.Top = $sender.ClientSize.Height - 48
     })
 
+
     $Script:GuiControls = [pscustomobject]@{
         Form            = $form
         Free            = $freeLbl
@@ -1204,9 +1510,8 @@ function Show-MaintenanceGui {
 
     $saved = Load-GuiSettings
     $Script:LoadedGuiSettings = $saved
-    Apply-GuiSettings -Controls $Script:GuiControls -Settings $saved
 
-    Ensure-SessionLog
+    Apply-GuiSettings -Controls $Script:GuiControls -Settings $saved
 
     Set-ActiveNav "Home"
     Update-GuiHomeSummary
@@ -1219,6 +1524,7 @@ function Show-MaintenanceGui {
     $uiTimer.Interval = 100
     $uiTimer.Add_Tick({ Drain-UiEventQueue; Pump-Ui })
     $uiTimer.Start()
+    $form.Add_Shown({ Enable-DarkTitleBar $form })
     $form.Add_FormClosed({
         try { $uiTimer.Stop(); $uiTimer.Dispose() } catch { }
         try { Save-GuiSettings $Script:GuiControls } catch { }
@@ -1322,8 +1628,6 @@ function Show-MaintenanceGui {
             $Script:DoRepair = $false
             $Script:DoAmd = $false
             $Script:DoGamingOptimize = $false
-            Ensure-SessionLog
-            Init-Log
             $Script:Report.Clear()
             $Script:RunStart = Get-Date
             $Script:StartFree = Get-CFreeGB
@@ -1379,8 +1683,6 @@ function Show-MaintenanceGui {
 
     $btnAmd.Add_Click({
         Invoke-GuiAction -Title "AMD" -Action {
-            Ensure-SessionLog
-            Init-Log
             $Script:Report.Clear()
             $Script:TotalSteps = 1
             $Script:CurrentStep = 0
@@ -1390,8 +1692,6 @@ function Show-MaintenanceGui {
 
     $btnNv.Add_Click({
         Invoke-GuiAction -Title "NVIDIA" -Action {
-            Ensure-SessionLog
-            Init-Log
             $Script:Report.Clear()
             $Script:TotalSteps = 1
             $Script:CurrentStep = 0
@@ -1404,8 +1704,6 @@ function Show-MaintenanceGui {
         Invoke-GuiAction -Title "Gaming optimize" -Action {
             $logBox = Get-UiControl Log
             if ($logBox) { $logBox.Clear() }
-            Ensure-SessionLog
-            Init-Log
             $Script:Report.Clear()
             $Script:RunStart = Get-Date
             $Script:TotalSteps = 2
@@ -1419,8 +1717,6 @@ function Show-MaintenanceGui {
 
     $btnFixPower.Add_Click({
         Invoke-GuiAction -Title "Fix power plan" -Action {
-            Ensure-SessionLog
-            Init-Log
             $Script:Report.Clear()
             $Script:TotalSteps = 1
             $Script:CurrentStep = 0
@@ -1485,8 +1781,6 @@ function Show-MaintenanceGui {
 
     $btnRestoreOnly.Add_Click({
         Invoke-GuiAction -Title "Restore point" -Action {
-            Ensure-SessionLog
-            Init-Log
             $Script:Report.Clear()
             $Script:RunStart = Get-Date
             $Script:TotalSteps = 1
@@ -1500,8 +1794,6 @@ function Show-MaintenanceGui {
         Update-GuiHomeSummary
         Update-GuiStatusBar -JobText "Device refreshed"
         Invoke-GuiAction -Title "Device report" -Action {
-            Ensure-SessionLog
-            Init-Log
             $Script:Report.Clear()
             $Script:TotalSteps = 1
             $Script:CurrentStep = 0
@@ -1575,11 +1867,6 @@ function Show-MaintenanceGui {
         [void](Invoke-RestartComputerConfirmed)
     })
 
-    $btnLogs.Add_Click({
-        $dir = Get-LogsDirectory
-        Start-Process explorer.exe $dir
-    })
-
     $btnCli.Add_Click({
         try {
             Start-ElevatedCli
@@ -1598,6 +1885,7 @@ function Show-MaintenanceGui {
         $form.Close()
     })
 
+
     [void]$form.ShowDialog()
 }
 
@@ -1607,7 +1895,6 @@ function Show-CliMenu {
     Write-Host "  ========================================"
     Write-Host "     PC MAINTENANCE KIT v$($Script:AppVersion) (Gamer)"
     Write-Host "  ========================================"
-    Write-Host "  Logs: Desktop\PC-Maintenance-Logs"
     Write-Host ""
     Write-Host "  [1] Weekly Full (cleanup + gaming; WU/winget off)"
     Write-Host "  [2] Cleanup only"

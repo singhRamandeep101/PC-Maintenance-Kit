@@ -1,15 +1,29 @@
 #Requires -Version 5.1
-$Script:AppVersion = "5.1.3"
+$Script:AppVersion = "5.1.4"
 $Script:GitHubRepo = "singhRamandeep101/PC-Maintenance-Kit"
 
-function Get-LogsDirectory {
-    $dir = Join-Path $env:USERPROFILE "Desktop\PC-Maintenance-Logs"
+function Get-AppDataDirectory {
+    $dir = Join-Path $env:LOCALAPPDATA "PC-Maintenance-Kit"
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     return $dir
 }
 
 function Get-GuiSettingsPath {
-    Join-Path (Get-LogsDirectory) "gui-settings.json"
+    $path = Join-Path (Get-AppDataDirectory) "gui-settings.json"
+    if (Test-PathSafe $path) { return $path }
+
+    $legacy = [System.Collections.Generic.List[string]]::new()
+    [void]$legacy.Add((Join-Path $env:USERPROFILE "Desktop\PC-Maintenance-Logs\gui-settings.json"))
+    if ($Script:AppRoot) {
+        [void]$legacy.Add((Join-Path $Script:AppRoot "PC-Maintenance-Logs\gui-settings.json"))
+    }
+    foreach ($old in $legacy) {
+        if (Test-PathSafe $old) {
+            try { Copy-Item -LiteralPath $old -Destination $path -Force } catch { }
+            break
+        }
+    }
+    return $path
 }
 
 function Get-DefaultGuiSettings {
@@ -310,7 +324,6 @@ function Get-RunSummaryObject {
         WarnCount     = $warn
         FailCount     = $fail
         RebootPending = [bool](Test-RebootPending)
-        LogFile       = $Script:LogFile
         ReportLines   = @($Script:Report)
     }
 }
@@ -329,7 +342,6 @@ function Show-RunSummaryDialog {
             "C: free: $($Summary.FreeBefore) GB -> $($Summary.FreeAfter) GB ($($Summary.SpaceChange) GB)"
             "Results: $($Summary.OkCount) OK | $($Summary.WarnCount) warn | $($Summary.FailCount) fail"
             "Restart pending: $reboot"
-            "Log: $($Summary.LogFile)"
         ) -join "`n"
         [System.Windows.Forms.MessageBox]::Show(
             $body,
@@ -517,9 +529,9 @@ try {
         Start-Process -FilePath `$ps -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-WindowStyle','Hidden','-File',`$ps1,'-Mode','Gui') -WorkingDirectory `$target
     }
 } catch {
-    `$logDir = Join-Path ([Environment]::GetFolderPath('Desktop')) 'PC-Maintenance-Logs'
-    if (-not (Test-Path `$logDir)) { New-Item -ItemType Directory -Path `$logDir -Force | Out-Null }
-    `$_ | Out-File (Join-Path `$logDir 'update-error.log') -Encoding utf8
+    `$errDir = Join-Path `$env:TEMP 'PC-Maintenance-Kit'
+    if (-not (Test-Path `$errDir)) { New-Item -ItemType Directory -Path `$errDir -Force | Out-Null }
+    `$_ | Out-File (Join-Path `$errDir 'update-error.log') -Encoding utf8
 } finally {
     Start-Sleep -Seconds 2
     try { Remove-Item -LiteralPath `$work -Recurse -Force -EA SilentlyContinue } catch { }

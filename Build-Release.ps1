@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 param(
-    [string]$Version = "5.1.3"
+    [string]$Version = "5.1.4"
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,6 +16,7 @@ New-Item -ItemType Directory -Path (Join-Path $Stage "docs") -Force | Out-Null
 
 Copy-Item (Join-Path $Root "Start.bat") $Stage
 Copy-Item (Join-Path $Root "PC-Maintenance.ps1") $Stage
+Copy-Item (Join-Path $Root "Get.ps1") $Stage -EA SilentlyContinue
 Copy-Item (Join-Path $Root "README.md") $Stage
 Copy-Item (Join-Path $Root "LICENSE") $Stage
 Copy-Item (Join-Path $Root "lib\*.ps1") (Join-Path $Stage "lib")
@@ -24,7 +25,7 @@ if (Test-Path (Join-Path $Root "docs\screenshots")) {
 }
 if (Test-Path (Join-Path $Root "tests")) {
     New-Item -ItemType Directory -Path (Join-Path $Stage "tests") -Force | Out-Null
-    Copy-Item (Join-Path $Root "tests\*") (Join-Path $Stage "tests") -Force -EA SilentlyContinue
+    Copy-Item (Join-Path $Root "tests\*.ps1") (Join-Path $Stage "tests") -Force -EA SilentlyContinue
 }
 
 Compress-Archive -Path $Stage -DestinationPath $Zip -Force

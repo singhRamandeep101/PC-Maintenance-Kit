@@ -54,6 +54,10 @@ $settings = Get-DefaultGuiSettings
 Assert-True ($settings.HomeWU -eq $false) 'Default HomeWU is false'
 Assert-True ($settings.HomeWinget -eq $false) 'Default HomeWinget is false'
 
+$settingsPath = Get-GuiSettingsPath
+$appDataPrefix = Join-Path $env:LOCALAPPDATA 'PC-Maintenance-Kit'
+Assert-True ($settingsPath.StartsWith($appDataPrefix)) 'GUI settings live under LocalAppData'
+
 if ($failed -gt 0) {
     Write-Host "`n$failed test(s) failed." -ForegroundColor Red
     exit 1

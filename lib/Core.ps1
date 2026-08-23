@@ -1,5 +1,4 @@
 $Script:Report = [System.Collections.Generic.List[string]]::new()
-$Script:LogFile = $null
 $Script:StartFree = 0
 $Script:EndFree = 0
 $Script:DoCleanup = $true
@@ -235,30 +234,14 @@ function Ensure-Admin {
     exit 0
 }
 
-function Init-Log {
-    param([switch]$ForceNew)
-    $dir = Join-Path $env:USERPROFILE "Desktop\PC-Maintenance-Logs"
+function Get-AppTempDirectory {
+    $dir = Join-Path $env:TEMP "PC-Maintenance-Kit"
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    if (-not $ForceNew -and $Script:LogFile -and (Test-PathSafe $Script:LogFile)) {
-        Write-Log "---- new action $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ----"
-        return
-    }
-    $stamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
-    $Script:LogFile = Join-Path $dir "maintenance_$stamp.log"
-    $ver = if ($Script:AppVersion) { $Script:AppVersion } else { "5.1" }
-    "PC Maintenance Kit v$ver started: $(Get-Date)" | Out-File $Script:LogFile -Encoding UTF8
-}
-
-function Ensure-SessionLog {
-    if (-not $Script:LogFile -or -not (Test-PathSafe $Script:LogFile)) {
-        Init-Log -ForceNew
-    }
+    return $dir
 }
 
 function Write-Log([string]$msg) {
-    if ($Script:LogFile) {
-        "$(Get-Date -Format 'HH:mm:ss')  $msg" | Out-File $Script:LogFile -Append -Encoding UTF8
-    }
+    # Live output stays in the GUI / console. No desktop log files.
 }
 
 function Get-Elapsed {
@@ -762,32 +745,65 @@ function Invoke-WindowsUpdate {
             }
             $install = Invoke-WithUiWait -Activity "Installing Windows Updates" -TimeoutSec 3600 -Sta -ScriptBlock {
                 try {
-                    Import-Module PSWindowsUpdate -Force -EA Stop
-                    $results = @(Get-WindowsUpdate -WindowsUpdate -AcceptAll -Install -IgnoreReboot -ErrorAction Stop)
-                    $ok = 0; $fail = 0; $reboot = 0
+                    # Raw WIA COM API instead of PSWindowsUpdate install: works in non-interactive
+                    # hosts (hidden window), accepts EULAs up front, and skips updates whose
+                    # installer would pop a user-input dialog (the cause of "command that prompts
+                    # the user failed" errors).
+                    $session = New-Object -ComObject Microsoft.Update.Session
+                    $searcher = $session.CreateUpdateSearcher()
+                    $result = $searcher.Search("IsInstalled=0 and IsHidden=0")
+                    $coll = New-Object -ComObject Microsoft.Update.UpdateColl
+                    $skippedInput = New-Object System.Collections.Generic.List[string]
+                    foreach ($u in @($result.Updates)) {
+                        if ($null -eq $u) { continue }
+                        try { if (-not $u.EulaAccepted) { $u.AcceptEula() } } catch { }
+                        $needsInput = $false
+                        try { if ($u.InstallationBehavior.CanRequestUserInput) { $needsInput = $true } } catch { }
+                        if ($needsInput) {
+                            [void]$skippedInput.Add([string]$u.Title)
+                            continue
+                        }
+                        [void]$coll.Add($u)
+                    }
                     $notes = New-Object System.Collections.Generic.List[string]
-                    foreach ($r in $results) {
-                        $title = if ($r.Title) { [string]$r.Title } elseif ($r.KB) { "KB$($r.KB)" } else { "update" }
-                        $rc = $null
-                        try { $rc = $r.Result } catch { }
-                        if (-not $rc) { try { $rc = $r.Status } catch { } }
-                        $rcText = if ($null -ne $rc) { "$rc" } else { "" }
+                    if ($skippedInput.Count -gt 0) {
+                        [void]$notes.Add(("SKIPPED(user input): {0}" -f (($skippedInput | Select-Object -First 3) -join "; ")))
+                    }
+                    if ($coll.Count -eq 0) {
+                        if ($skippedInput.Count -gt 0) {
+                            "OK|installed=0|failed=0|reboot=0|" + (($notes | Select-Object -First 5) -join "; ")
+                        } else {
+                            "EMPTY"
+                        }
+                        return
+                    }
+                    $downloader = $session.CreateUpdateDownloader()
+                    $downloader.Updates = $coll
+                    $dl = $downloader.Download()
+                    if ([int]$dl.ResultCode -eq 4) {
+                        throw ("Download failed (HResult {0})" -f $dl.HResult)
+                    }
+                    $installer = $session.CreateUpdateInstaller()
+                    $installer.Updates = $coll
+                    $res = $installer.Install()
+                    $ok = 0; $fail = 0; $reboot = 0
+                    for ($i = 0; $i -lt $coll.Count; $i++) {
+                        $r = $res.GetUpdateResult($i)
+                        $title = [string]$coll.Item($i).Title
+                        $code = 0
+                        try { $code = [int]$r.ResultCode } catch { }
                         $needReboot = $false
                         try { if ($r.RebootRequired) { $needReboot = $true; $reboot++ } } catch { }
-                        if ($rcText -match '(?i)fail|error|abort') {
-                            $fail++
-                            [void]$notes.Add(("FAIL: {0} ({1})" -f $title, $rcText))
-                        } elseif ($rcText -match '(?i)installed|downloaded|ok|success' -or $needReboot -or [string]::IsNullOrWhiteSpace($rcText)) {
-                            $ok++
-                            if ($needReboot) { [void]$notes.Add(("REBOOT: {0}" -f $title)) }
-                        } else {
-                            $ok++
-                            [void]$notes.Add(("RESULT: {0} ({1})" -f $title, $rcText))
+                        switch ($code) {
+                            2 { $ok++; if ($needReboot) { [void]$notes.Add(("REBOOT: {0}" -f $title)) } }
+                            3 { $ok++; [void]$notes.Add(("PARTIAL: {0}" -f $title)) }
+                            default {
+                                $fail++
+                                [void]$notes.Add(("FAIL: {0} (code {1})" -f $title, $code))
+                            }
                         }
                     }
-                    if ($results.Count -eq 0) {
-                        "EMPTY"
-                    } elseif ($fail -gt 0 -and $ok -eq 0) {
+                    if ($fail -gt 0 -and $ok -eq 0) {
                         "ERR:" + (($notes | Select-Object -First 3) -join "; ")
                     } else {
                         "OK|installed=$ok|failed=$fail|reboot=$reboot|" + (($notes | Select-Object -First 5) -join "; ")
@@ -937,7 +953,7 @@ function Invoke-WingetUpdates {
                 $verCol = $line.IndexOf('Version')
                 continue
             }
-            if ($line -match '^-+' -or $line -match '^\s*\d+\s+upgrades? available' -or $line -match '^\s*\d+\s+package' -or $line -match 'No installed package found' -or $line -match 'No newer package versions' -or $line -match 'version numbers that cannot be determined') {
+            if ($line -match '^-+' -or $line -match '^\s*\d+\s+upgrades? available' -or $line -match '\d\s+upgrades?\s+available' -or $line -match '^\s*\d+\s+package' -or $line -match 'The following packages' -or $line -match 'require explicit targeting' -or $line -match 'have an upgrade available' -or $line -match 'No installed package found' -or $line -match 'No newer package versions' -or $line -match 'version numbers that cannot be determined') {
                 continue
             }
 
@@ -946,6 +962,8 @@ function Invoke-WingetUpdates {
             if ($idCol -ge 0 -and $verCol -gt $idCol -and $line.Length -gt $idCol) {
                 $end = [Math]::Min($verCol, $line.Length)
                 $id = $line.Substring($idCol, $end - $idCol).Trim()
+                # Reject prose fragments sliced out of summary/footer lines
+                if ($id -match '\s') { $id = $null }
             }
             if (-not $id) {
                 # Fallback: last Publisher.Product-style token before version columns
@@ -954,7 +972,10 @@ function Invoke-WingetUpdates {
                     $id = $idMatches[$idMatches.Count - 1].Groups[1].Value
                 }
             }
-            if (-not $id -or $id -match '^(Name|Id|Version|Available|Source|winget|msstore)$' -or $id -match '^\d') { continue }
+            # Only accept real package Ids: Publisher.Product style, or msstore-style (e.g. 9WZDNCRFJ3TZ)
+            $idValid = ($id -cmatch '^[A-Za-z][A-Za-z0-9_+-]*(?:\.[A-Za-z0-9][A-Za-z0-9_+-]*)+$') -or
+                       ($id -cmatch '^[A-Z0-9]{8,16}$')
+            if (-not $idValid -or $id -match '^(Name|Id|Version|Available|Source|winget|msstore)$' -or $id -match '^\d') { continue }
 
             $skip = $false
             foreach ($s in $wingetSkipIds) {
@@ -1400,8 +1421,7 @@ function Invoke-Repair {
 
     try {
         Write-Info "DISM /RestoreHealth starting..."
-        Ensure-SessionLog
-        $dismLog = Join-Path (Split-Path $Script:LogFile) "dism_$(Get-Date -Format 'HHmmss').log"
+        $dismLog = Join-Path (Get-AppTempDirectory) "dism_$(Get-Date -Format 'HHmmss').log"
         $p = Start-Process -FilePath "DISM.exe" -ArgumentList "/Online","/Cleanup-Image","/RestoreHealth","/LogPath:$dismLog" -PassThru -NoNewWindow
         Register-TrackedProcess $p
         $spin = @('|','/','-','\'); $i = 0
@@ -1476,7 +1496,6 @@ function Get-RunSummaryText {
         "C: free before: $($Script:StartFree) GB",
         "C: free after : $($Script:EndFree) GB",
         "Space change  : $gained GB",
-        "Log file      : $($Script:LogFile)",
         ""
     )
     foreach ($line in $Script:Report) { $lines += $line }
@@ -1489,8 +1508,6 @@ function Invoke-MaintenanceRun {
     Clear-TrackedProcesses
     $Script:Report.Clear()
     $Script:RunStart = Get-Date
-    Ensure-SessionLog
-    Init-Log
     Build-StepPlan
     $Script:StartFree = Get-CFreeGB
 
