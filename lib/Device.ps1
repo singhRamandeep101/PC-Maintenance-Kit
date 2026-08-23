@@ -1,16 +1,9 @@
-function Get-InstalledRamPartNumbers {
-    $parts = @(Get-CimInstance Win32_PhysicalMemory -EA SilentlyContinue | ForEach-Object {
-        if ($_.PartNumber) { $_.PartNumber.Trim() }
-    } | Where-Object { $_ } | Select-Object -Unique)
-    return $parts
-}
+$Script:DeviceSummaryCache = $null
+$Script:DeviceSummaryCacheUtc = [datetime]::MinValue
 
 function Get-RamUpgradeTip {
     $s = Get-DeviceSummary
-    $parts = @(Get-InstalledRamPartNumbers)
-    $part = $null
-    if ($parts.Count -ge 1) { $part = [string]$parts[0] }
-    if (-not $part -and $s.RamPartNumber) { $part = [string]$s.RamPartNumber }
+    $part = [string]$s.RamPartNumber
     if ($s.RamChannels -match 'Single' -or $s.RamSticks -eq 1) {
         if ($part -and $part.Length -gt 2) {
             return "You have 1 stick ($part). Buy a matching second stick of the same model for dual-channel. Search: $part"
@@ -54,6 +47,11 @@ function Open-StorageSettings {
 }
 
 function Get-DeviceSummary {
+    param([switch]$Refresh)
+    if (-not $Refresh -and $Script:DeviceSummaryCache -and (([datetime]::UtcNow - $Script:DeviceSummaryCacheUtc).TotalSeconds -lt 12)) {
+        return $Script:DeviceSummaryCache
+    }
+
     $cpu = (Get-CimInstance Win32_Processor -EA SilentlyContinue | Select-Object -First 1).Name
     if (-not $cpu) { $cpu = "Unknown CPU" }
 
@@ -116,7 +114,7 @@ function Get-DeviceSummary {
     $power = Get-ActivePowerPlanName
     $reboot = Test-RebootPending
 
-    return [pscustomobject]@{
+    $summary = [pscustomobject]@{
         Cpu           = $cpu.Trim()
         Gpu           = $gpu
         RamGb         = $ramGb
@@ -130,6 +128,9 @@ function Get-DeviceSummary {
         PowerPlan     = $power
         RebootPending = $reboot
     }
+    $Script:DeviceSummaryCache = $summary
+    $Script:DeviceSummaryCacheUtc = [datetime]::UtcNow
+    return $summary
 }
 
 function Format-DeviceSummaryText {

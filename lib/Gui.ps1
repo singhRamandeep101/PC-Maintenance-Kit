@@ -98,49 +98,6 @@ function New-GlyphLabel {
     return $lbl
 }
 
-# Pill-shaped chip that renders its own text; Text/ForeColor stay assignable
-function New-ChipLabel {
-    param([string]$Text, [int]$Width, $Color, [string]$FontName = "Segoe UI Semibold", [single]$Pt = 8.75)
-    $p = New-Object System.Windows.Forms.Panel
-    $p.Size = New-Object System.Drawing.Size($Width, 26)
-    $p.Text = $Text
-    $p.ForeColor = $Color
-    $p.BackColor = [System.Drawing.Color]::Transparent
-    Enable-DoubleBuffer $p
-    $p.Add_Paint({
-        param($sender, $e)
-        try {
-            $g = $e.Graphics
-            $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-            $c = $sender.ForeColor
-            $rect = New-Object System.Drawing.Rectangle(1, 1, ($sender.Width - 3), ($sender.Height - 3))
-            $path = New-Object System.Drawing.Drawing2D.GraphicsPath
-            $dd = 12
-            [void]$path.AddArc($rect.X, $rect.Y, $dd, $dd, 180, 90)
-            [void]$path.AddArc((($rect.X + $rect.Width) - $dd), $rect.Y, $dd, $dd, 270, 90)
-            [void]$path.AddArc((($rect.X + $rect.Width) - $dd), (($rect.Y + $rect.Height) - $dd), $dd, $dd, 0, 90)
-            [void]$path.AddArc($rect.X, (($rect.Y + $rect.Height) - $dd), $dd, $dd, 90, 90)
-            $path.CloseFigure()
-            $fill = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(24, $c.R, $c.G, $c.B))
-            $g.FillPath($fill, $path)
-            $fill.Dispose()
-            $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(90, $c.R, $c.G, $c.B)), 1
-            $g.DrawPath($pen, $path)
-            $pen.Dispose()
-            $path.Dispose()
-            $font = New-Object System.Drawing.Font($FontName, $Pt)
-            $mode = New-Object System.Drawing.StringFormat
-            $mode.Alignment = [System.Drawing.StringAlignment]::Center
-            $mode.LineAlignment = [System.Drawing.StringAlignment]::Center
-            $tb = New-Object System.Drawing.Rectangle(6, 0, ($sender.Width - 12), $sender.Height)
-            [System.Windows.Forms.TextRenderer]::DrawText($g, $sender.Text, $font, $tb, $sender.ForeColor)
-            $font.Dispose()
-            $mode.Dispose()
-        } catch { }
-    }.GetNewClosure())
-    return $p
-}
-
 function Add-PanelBorder {
     param($Panel, $Color = $null, [int]$Width = 1, [int]$Radius = 12)
     if (-not $Color) { $Color = $Script:Theme.Border }
@@ -455,6 +412,10 @@ function New-GameStatusRow {
     $valLbl.Size = New-Object System.Drawing.Size(230, 24)
     $valLbl.Anchor = "Top,Right"
     $valLbl.BackColor = [System.Drawing.Color]::Transparent
+    $row.Add_Resize({
+        param($sender, $e)
+        $valLbl.Left = [Math]::Max(170, $sender.ClientSize.Width - 242)
+    }.GetNewClosure())
     # LED dot rendered from live ForeColor so status color changes update it too
     $valLbl.Add_Paint({
         param($sender, $e)
@@ -525,7 +486,10 @@ function Set-GuiBusy([bool]$Busy) {
         $stop.Enabled = $Busy
         $stop.Visible = $true
     }
-    if (-not $Busy) { $Script:LastJobText = "Ready" }
+    if (-not $Busy) {
+        $Script:LastJobText = "Ready"
+        $Script:DeviceSummaryCache = $null
+    }
     Update-GuiStatusBar
 }
 
@@ -849,9 +813,7 @@ function Show-MaintenanceGui {
 
             # Status chips (top-right)
             $chipFont = New-Object System.Drawing.Font("Segoe UI Semibold", 8.75)
-            $modeC = New-Object System.Drawing.StringFormat
-            $modeC.Alignment = [System.Drawing.StringAlignment]::Center
-            $modeC.LineAlignment = [System.Drawing.StringAlignment]::Center
+            $chipFlags = [System.Windows.Forms.TextFormatFlags]::HorizontalCenter -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis
 
             foreach ($chip in @(@{ Src = $sender.Tag.Free; Y = 18; W = 148 }, @{ Src = $sender.Tag.Reboot; Y = 50; W = 172 })) {
                 $src = $chip.Src
@@ -876,10 +838,9 @@ function Show-MaintenanceGui {
                 $penC.Dispose()
                 $pathC.Dispose()
                 $tbC = New-Object System.Drawing.Rectangle(($rectC.X + 6), $rectC.Y, ($rectC.Width - 12), $rectC.Height)
-                [System.Windows.Forms.TextRenderer]::DrawText($g, $src.Text, $chipFont, $tbC, $cc, $modeC)
+                [System.Windows.Forms.TextRenderer]::DrawText($g, $src.Text, $chipFont, $tbC, $cc, $chipFlags)
             }
             $chipFont.Dispose()
-            $modeC.Dispose()
         } catch { }
     })
 

@@ -58,6 +58,41 @@ $settingsPath = Get-GuiSettingsPath
 $appDataPrefix = Join-Path $env:LOCALAPPDATA 'PC-Maintenance-Kit'
 Assert-True ($settingsPath.StartsWith($appDataPrefix)) 'GUI settings live under LocalAppData'
 
+Assert-True ($Script:AppVersion -eq '5.1.5') 'AppVersion is 5.1.5'
+
+Apply-ModeFlags Full
+Assert-True ($Script:DoWinUpdate -eq $false) 'Weekly Full leaves Windows Update off'
+Assert-True ($Script:DoWinget -eq $false) 'Weekly Full leaves winget off'
+Assert-True ($Script:DoCleanup -eq $true) 'Weekly Full runs cleanup'
+Reset-MaintenanceFlags
+
+. (Join-Path $Root 'lib\Gaming.ps1')
+. (Join-Path $Root 'lib\Device.ps1')
+$summaryErr = $null
+$summary = $null
+try {
+    $summary = Get-DeviceSummary
+} catch {
+    $summaryErr = $_
+}
+Assert-True ($null -eq $summaryErr) 'Get-DeviceSummary does not throw'
+Assert-True ($null -ne $summary -and $summary.Cpu) 'Get-DeviceSummary returns CPU'
+$summary2 = Get-DeviceSummary
+Assert-True ([object]::ReferenceEquals($summary, $summary2)) 'Get-DeviceSummary cache returns same object'
+
+$parseFiles = @(
+    'PC-Maintenance.ps1', 'Get.ps1', 'Build-Release.ps1',
+    'lib\Core.ps1', 'lib\Gui.ps1', 'lib\Extras.ps1', 'lib\Device.ps1', 'lib\Gaming.ps1'
+)
+foreach ($rel in $parseFiles) {
+    $parsePath = Join-Path $Root $rel
+    $errs = $null
+    $toks = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($parsePath, [ref]$toks, [ref]$errs)
+    $ok = -not $errs -or $errs.Count -eq 0
+    Assert-True $ok ("Parse $rel")
+}
+
 if ($failed -gt 0) {
     Write-Host "`n$failed test(s) failed." -ForegroundColor Red
     exit 1

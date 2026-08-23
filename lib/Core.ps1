@@ -177,7 +177,7 @@ function Invoke-WithUiWait {
         $result = $ps.EndInvoke($handle)
         if ($ps.HadErrors) {
             foreach ($e in $ps.Streams.Error) {
-                Write-Log ("ASYNC_ERR: " + $e.ToString())
+                Write-Warn ("Background error: " + $e.ToString())
             }
         }
         return $result
@@ -240,10 +240,6 @@ function Get-AppTempDirectory {
     return $dir
 }
 
-function Write-Log([string]$msg) {
-    # Live output stays in the GUI / console. No desktop log files.
-}
-
 function Get-Elapsed {
     $ts = (Get-Date) - $Script:RunStart
     if ($ts.TotalHours -ge 1) {
@@ -302,34 +298,29 @@ function Write-Step([string]$msg) {
     Write-Host "=== [$($Script:CurrentStep)/$($Script:TotalSteps)] $msg ===" -ForegroundColor Cyan
     Update-UiProgress -Label $msg
     Append-UiLog (">> [{0}/{1}] {2}" -f $Script:CurrentStep, $Script:TotalSteps, $msg) "Cyan"
-    Write-Log "STEP $($Script:CurrentStep)/$($Script:TotalSteps): $msg"
 }
 
 function Write-Ok([string]$msg) {
     Write-Host "  [OK] $msg" -ForegroundColor Green
     $Script:Report.Add("[OK] $msg") | Out-Null
     Append-UiLog "  [OK] $msg" "Green"
-    Write-Log "OK: $msg"
 }
 
 function Write-Warn([string]$msg) {
     Write-Host "  [!] $msg" -ForegroundColor Yellow
     $Script:Report.Add("[!] $msg") | Out-Null
     Append-UiLog "  [!] $msg" "Yellow"
-    Write-Log "WARN: $msg"
 }
 
 function Write-Fail([string]$msg) {
     Write-Host "  [X] $msg" -ForegroundColor Red
     $Script:Report.Add("[X] $msg") | Out-Null
     Append-UiLog "  [X] $msg" "Red"
-    Write-Log "FAIL: $msg"
 }
 
 function Write-Info([string]$msg) {
     Write-Host "  ... $msg" -ForegroundColor DarkGray
     Append-UiLog "  ... $msg" "Gray"
-    Write-Log "INFO: $msg"
 }
 
 function Get-CFreeGB {
@@ -346,44 +337,6 @@ function Test-RebootPending {
         if ($pfr -and $pfr.PendingFileRenameOperations) { return $true }
     } catch { }
     return $false
-}
-
-function Wait-WithSpinner {
-    param(
-        [System.Diagnostics.Process]$Process,
-        [int]$TimeoutSec = 120,
-        [string]$Activity = "Working"
-    )
-    Register-TrackedProcess $Process
-    $spin = @('|','/','-','\')
-    $i = 0
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while (-not $Process.HasExited) {
-        if (Test-CancelRequested) {
-            Write-Host ""
-            try { $Process.Kill() } catch { }
-            Write-Warn "$Activity cancelled"
-            return $false
-        }
-        if ($sw.Elapsed.TotalSeconds -ge $TimeoutSec) {
-            Write-Host ""
-            try { $Process.Kill() } catch { }
-            Write-Warn "$Activity timed out after ${TimeoutSec}s - skipped"
-            return $false
-        }
-        $ch = $spin[$i % 4]
-        $sec = [int]$sw.Elapsed.TotalSeconds
-        Write-Host -NoNewline ("`r  [{0}] {1}... {2}s / {3}s max   " -f $ch, $Activity, $sec, $TimeoutSec) -ForegroundColor DarkYellow
-        if ($Script:Ui -or $Script:UiShare) {
-            Set-UiStatusText -Text ("[{0}] {1}... {2}s / {3}s" -f $ch, $Activity, $sec, $TimeoutSec)
-        }
-        Pump-Ui
-        Start-Sleep -Milliseconds 250
-        $i++
-    }
-    Write-Host -NoNewline "`r"
-    Write-Host ("  [OK] {0} finished in {1}s                    " -f $Activity, [int]$sw.Elapsed.TotalSeconds) -ForegroundColor Green
-    return $true
 }
 
 function Apply-ModeFlags {
@@ -830,8 +783,7 @@ function Invoke-WindowsUpdate {
                     Write-Warn "At least one update needs a reboot before it fully applies"
                 }
                 if ($instText -match 'failed=([1-9]\d*)') {
-                    Write-Warn "Some updates reported failure - see log"
-                    Write-Log $instText
+                    Write-Warn "Some updates reported failure"
                 }
             } elseif ($instText -ne "OK") {
                 $errMsg = if ($instText -like "ERR:*") { $instText.Substring(4) } else { $instText }
@@ -933,7 +885,6 @@ function Invoke-WingetUpdates {
             Write-Warn "winget list returned no output"
             return
         }
-        Write-Log $listOut
 
         if ($listOut -match "No newer package versions" -or
             ($listOut -match "No installed package found matching input criteria" -and $listOut -notmatch '\dupgrades?\s+available')) {
@@ -1118,17 +1069,17 @@ function Invoke-WingetUpdates {
                 $okCount = ([regex]::Matches($out, "Successfully installed")).Count
             }
         }
-        Write-Log $out
+
         if ($okCount -gt 0) {
             Write-Ok ("winget upgraded {0} package(s)" -f $okCount)
         }
         if ($failCount -gt 0) {
-            Write-Warn ("winget failed for {0} package(s): {1}" -f $failCount, $(if ($failIds) { $failIds } else { "see log" }))
+            Write-Warn ("winget failed for {0} package(s): {1}" -f $failCount, $(if ($failIds) { $failIds } else { "check the activity panel" }))
         }
         if ($okCount -eq 0 -and $failCount -eq 0) {
             Write-Ok "winget apps are up to date"
         } elseif ($okCount -eq 0 -and $failCount -gt 0) {
-            Write-Warn "No packages were upgraded - see log"
+            Write-Warn "No packages were upgraded"
         }
     } catch {
         if ($_.Exception.Message -match 'Cancelled') { throw }
@@ -1512,7 +1463,6 @@ function Invoke-MaintenanceRun {
     $Script:StartFree = Get-CFreeGB
 
     Write-Info "C: free space before: $($Script:StartFree) GB"
-    Write-Log "Free before: $($Script:StartFree) GB"
     Write-Info ("Plan: " + ($Script:StepNames -join " > "))
 
     try {
@@ -1554,8 +1504,6 @@ function Invoke-MaintenanceRun {
     Append-UiLog ""
     Append-UiLog "======== DONE ========" "Green"
     Append-UiLog $summary "Cyan"
-    Write-Log "DONE"
-    Write-Log $summary
     if (-not (Test-CancelRequested)) {
         Show-RebootRecommendedDialog
         if (Get-Command Show-RunSummaryDialog -EA SilentlyContinue) {

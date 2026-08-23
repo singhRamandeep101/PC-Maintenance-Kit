@@ -44,7 +44,7 @@ try {
     }
 
     $rc = Join-Path $env:SystemRoot 'System32\robocopy.exe'
-    & $rc $source $Dest /E /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP /XD .git | Out-Null
+    & $rc $source $Dest /E /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP /XD .git tests dist docs .github | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "Could not copy files (robocopy $LASTEXITCODE)." }
 
     $startBat = Join-Path $Dest 'Start.bat'

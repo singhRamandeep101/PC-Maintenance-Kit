@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-$Script:AppVersion = "5.1.4"
+$Script:AppVersion = "5.1.5"
 $Script:GitHubRepo = "singhRamandeep101/PC-Maintenance-Kit"
 
 function Get-AppDataDirectory {
