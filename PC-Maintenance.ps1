@@ -41,6 +41,12 @@ try {
             Show-CliMenu
         }
         default {
+            if ($Mode -eq 'Repair' -or $Mode -eq 'FullRepair') {
+                if (-not (Confirm-RepairAction -ModeName $Mode)) {
+                    Write-Host "  Repair cancelled." -ForegroundColor Yellow
+                    exit 0
+                }
+            }
             Apply-ModeFlags -ModeName $Mode
             [void](Invoke-MaintenanceRun)
             Write-Host ""

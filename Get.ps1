@@ -5,7 +5,8 @@
 
 .DESCRIPTION
     Installs the latest GitHub *release* ZIP to %LOCALAPPDATA%\PC-Maintenance-Kit
-    after checking its SHA256 checksum. Administrator permission is requested on launch.
+    after checking its SHA256 checksum. Refuses to install without a verified hash.
+    Administrator permission is requested on launch.
 
 .EXAMPLE
     irm https://raw.githubusercontent.com/singhRamandeep101/PC-Maintenance-Kit/main/Get.ps1 | iex
@@ -51,9 +52,14 @@ function Get-ReleaseDownload {
         Where-Object { $_.name -match '\.sha256$' -and $_.browser_download_url } |
         Select-Object -First 1
     if ($sumAsset) {
-        $sumPath = Join-Path $Work 'expected.sha256'
-        Invoke-WebRequest -Uri $sumAsset.browser_download_url -OutFile $sumPath -UseBasicParsing -Headers @{ 'User-Agent' = 'PC-Maintenance-Kit' }
-        $expected = Get-ExpectedSha256 (Get-Content -LiteralPath $sumPath -Raw -EA SilentlyContinue)
+        try {
+            $sumPath = Join-Path $Work 'expected.sha256'
+            Invoke-WebRequest -Uri $sumAsset.browser_download_url -OutFile $sumPath -UseBasicParsing -Headers @{ 'User-Agent' = 'PC-Maintenance-Kit' }
+            $expected = Get-ExpectedSha256 (Get-Content -LiteralPath $sumPath -Raw -EA SilentlyContinue)
+        } catch {
+            # Keep going — GitHub asset digest may still provide the hash.
+            $expected = $null
+        }
     }
     if (-not $expected -and $zip.digest) {
         $expected = Get-ExpectedSha256 ([string]$zip.digest)
@@ -88,28 +94,29 @@ Write-Host "  Downloading from GitHub..." -ForegroundColor DarkGray
 New-Item -ItemType Directory -Path $Work -Force | Out-Null
 try {
     $zipPath = Join-Path $Work 'kit.zip'
-    $info = $null
-    try { $info = Get-ReleaseDownload } catch { $info = $null }
-
-    if ($info -and $info.Url) {
-        Write-Host ("  Release {0}" -f $info.Tag) -ForegroundColor DarkGray
-        Invoke-WebRequest -Uri $info.Url -OutFile $zipPath -UseBasicParsing -Headers @{ 'User-Agent' = 'PC-Maintenance-Kit' }
-    } else {
-        Write-Host "  No GitHub release ZIP found; using main branch (checksum not available)." -ForegroundColor Yellow
-        Invoke-WebRequest -Uri "https://github.com/$Repo/archive/refs/heads/main.zip" -OutFile $zipPath -UseBasicParsing -Headers @{ 'User-Agent' = 'PC-Maintenance-Kit' }
+    try {
+        $info = Get-ReleaseDownload
+    } catch {
+        throw ("Could not fetch GitHub release info: {0}`nCheck your network connection and try again." -f $_.Exception.Message)
     }
+
+    if (-not ($info -and $info.Url)) {
+        throw "No GitHub release ZIP found. Publish a Release with PC-Maintenance-Kit-vX.Y.Z.zip (+ .sha256), or download manually."
+    }
+
+    Write-Host ("  Release {0}" -f $info.Tag) -ForegroundColor DarkGray
+    Invoke-WebRequest -Uri $info.Url -OutFile $zipPath -UseBasicParsing -Headers @{ 'User-Agent' = 'PC-Maintenance-Kit' }
 
     if (-not (Test-Path -LiteralPath $zipPath) -or ((Get-Item -LiteralPath $zipPath).Length -lt 1000)) {
         throw "Download failed or file was empty."
     }
     try { Unblock-File -LiteralPath $zipPath -EA SilentlyContinue } catch { }
 
-    if ($info -and $info.Expected) {
-        $got = Test-Sha256File -Path $zipPath -Expected $info.Expected
-        Write-Host ("  SHA256 OK  {0}" -f $got) -ForegroundColor Green
-    } elseif ($info) {
-        Write-Host "  SHA256 file was not attached to this release; skipping checksum." -ForegroundColor Yellow
+    if (-not $info.Expected) {
+        throw "Release has no SHA256 checksum attached. Refusing to install without integrity verification."
     }
+    $got = Test-Sha256File -Path $zipPath -Expected $info.Expected
+    Write-Host ("  SHA256 OK  {0}" -f $got) -ForegroundColor Green
 
     $extract = Join-Path $Work 'extract'
     Expand-Archive -LiteralPath $zipPath -DestinationPath $extract -Force
