@@ -1,5 +1,23 @@
 #Requires -Version 5.1
-$Script:AppVersion = "5.1.6"
+function Get-KitVersion {
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    if ($Script:AppRoot) { [void]$candidates.Add((Join-Path $Script:AppRoot 'VERSION')) }
+    if ($PSScriptRoot) {
+        [void]$candidates.Add((Join-Path (Split-Path -Parent $PSScriptRoot) 'VERSION'))
+        [void]$candidates.Add((Join-Path $PSScriptRoot 'VERSION'))
+    }
+    foreach ($path in $candidates) {
+        if ($path -and (Test-Path -LiteralPath $path -EA SilentlyContinue)) {
+            try {
+                $raw = (Get-Content -LiteralPath $path -Raw -EA Stop).Trim()
+                if ($raw -match '^\d+(\.\d+){1,3}$') { return $raw }
+            } catch { }
+        }
+    }
+    return '5.2.6'
+}
+
+$Script:AppVersion = Get-KitVersion
 $Script:GitHubRepo = "singhRamandeep101/PC-Maintenance-Kit"
 
 function Get-AppDataDirectory {
@@ -38,6 +56,7 @@ function Get-DefaultGuiSettings {
         CleanSteam      = $false
         CleanEpic       = $false
         CleanRiot       = $false
+        CleanWuCache    = $false
         UpdRestore      = $true
         UpdWU           = $true
         UpdWinget       = $true
@@ -65,6 +84,7 @@ function Save-GuiSettings {
             CleanSteam      = [bool]$Controls.ChkSteam.Checked
             CleanEpic       = [bool]$Controls.ChkEpic.Checked
             CleanRiot       = [bool]$Controls.ChkRiot.Checked
+            CleanWuCache    = [bool]$Controls.ChkWuCache.Checked
             UpdRestore      = [bool]$Controls.ChkUpdRestore.Checked
             UpdWU           = [bool]$Controls.ChkUpdWU.Checked
             UpdWinget       = [bool]$Controls.ChkUpdWinget.Checked
@@ -75,7 +95,9 @@ function Save-GuiSettings {
         $json = ($obj | ConvertTo-Json -Depth 5)
         $utf8 = New-Object System.Text.UTF8Encoding $false
         [System.IO.File]::WriteAllText((Get-GuiSettingsPath), $json, $utf8)
-    } catch { }
+    } catch {
+        Write-Warn ("Could not save GUI settings: {0}" -f $_.Exception.Message)
+    }
 }
 
 function Load-GuiSettings {
@@ -111,6 +133,9 @@ function Apply-GuiSettings {
         $Controls.ChkSteam.Checked       = [bool]$Settings.CleanSteam
         $Controls.ChkEpic.Checked        = [bool]$Settings.CleanEpic
         $Controls.ChkRiot.Checked        = [bool]$Settings.CleanRiot
+        if ($Controls.ChkWuCache) {
+            $Controls.ChkWuCache.Checked = [bool]$Settings.CleanWuCache
+        }
         $Controls.ChkUpdRestore.Checked  = [bool]$Settings.UpdRestore
         $Controls.ChkUpdWU.Checked       = [bool]$Settings.UpdWU
         $Controls.ChkUpdWinget.Checked   = [bool]$Settings.UpdWinget
@@ -160,7 +185,8 @@ function Get-CleanupPreview {
         [bool]$Shaders = $true,
         [bool]$Steam = $false,
         [bool]$Epic = $false,
-        [bool]$Riot = $false
+        [bool]$Riot = $false,
+        [bool]$WuCache = $false
     )
     $rows = [System.Collections.Generic.List[object]]::new()
     $total = 0L
@@ -184,6 +210,20 @@ function Get-CleanupPreview {
             Bytes = $bytes
             Size  = if ($bytes -ge 1MB) { "{0:N1} MB" -f ($bytes / 1MB) } else { "{0:N0} KB" -f ($bytes / 1KB) }
         })
+    }
+
+    $browserMap = Get-BrowserCachePaths
+    foreach ($browser in $browserMap.Keys) {
+        foreach ($p in $browserMap[$browser]) {
+            $bytes = Get-FolderSizeBytes $p 0
+            $total += $bytes
+            [void]$rows.Add([pscustomobject]@{
+                Label = "Browser/$browser"
+                Path  = $p
+                Bytes = $bytes
+                Size  = if ($bytes -ge 1MB) { "{0:N1} MB" -f ($bytes / 1MB) } else { "{0:N0} KB" -f ($bytes / 1KB) }
+            })
+        }
     }
 
     if ($Shaders) {
@@ -249,6 +289,20 @@ function Get-CleanupPreview {
         }
     }
 
+    if ($WuCache) {
+        $wuPath = "C:\Windows\SoftwareDistribution\Download"
+        if (Test-PathSafe $wuPath) {
+            $bytes = Get-FolderSizeBytes $wuPath 0
+            $total += $bytes
+            [void]$rows.Add([pscustomobject]@{
+                Label = "WU Download Cache"
+                Path  = $wuPath
+                Bytes = $bytes
+                Size  = if ($bytes -ge 1MB) { "{0:N1} MB" -f ($bytes / 1MB) } else { "{0:N0} KB" -f ($bytes / 1KB) }
+            })
+        }
+    }
+
     return [pscustomobject]@{
         Rows       = @($rows)
         TotalBytes = $total
@@ -305,7 +359,7 @@ function Show-CleanupPreviewDialog {
     $form.Controls.AddRange(@($btnOk, $btnCancel))
     $form.AcceptButton = $btnOk
     $form.CancelButton = $btnCancel
-    return $form.ShowDialog()
+    return Invoke-WithUiModal { $form.ShowDialog() }
 }
 
 function Get-RunSummaryObject {
@@ -343,17 +397,24 @@ function Show-RunSummaryDialog {
             "Results: $($Summary.OkCount) OK | $($Summary.WarnCount) warn | $($Summary.FailCount) fail"
             "Restart pending: $reboot"
         ) -join "`n"
-        [System.Windows.Forms.MessageBox]::Show(
-            $body,
-            $Title,
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            $(if ($Summary.FailCount -gt 0) {
+        [void](Show-UiMessageBox `
+            -Text $body `
+            -Caption $Title `
+            -Buttons ([System.Windows.Forms.MessageBoxButtons]::OK) `
+            -Icon $(if ($Summary.FailCount -gt 0) {
                 [System.Windows.Forms.MessageBoxIcon]::Warning
             } else {
                 [System.Windows.Forms.MessageBoxIcon]::Information
-            })
-        ) | Out-Null
+            }))
     } catch { }
+}
+
+function Get-ExpectedSha256Text {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $line = (($Text -split "`r?`n") | Where-Object { $_ -and ($_ -notmatch '^\s*#') } | Select-Object -First 1)
+    if ($line -match '([A-Fa-f0-9]{64})') { return $Matches[1].ToLowerInvariant() }
+    return $null
 }
 
 function Get-GitHubLatestRelease {
@@ -370,15 +431,26 @@ function Get-GitHubLatestRelease {
             $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
             $json = $reader.ReadToEnd() | ConvertFrom-Json
             $zipAsset = @($json.assets) |
-                Where-Object { $_.name -and ($_.name -match '\.zip$') -and $_.browser_download_url } |
+                Where-Object { $_.name -and ($_.name -match '\.zip$') -and ($_.name -notmatch '\.sha256') -and $_.browser_download_url } |
                 Select-Object -First 1
+            $sumAsset = @($json.assets) |
+                Where-Object { $_.name -and ($_.name -match '\.sha256$') -and $_.browser_download_url } |
+                Select-Object -First 1
+            $expected = $null
+            $digest = $null
+            if ($zipAsset -and $zipAsset.digest) {
+                $digest = Get-ExpectedSha256Text ([string]$zipAsset.digest)
+            }
             return [pscustomobject]@{
-                Tag     = [string]$json.tag_name
-                Name    = [string]$json.name
-                Url     = [string]$json.html_url
-                Latest  = ([string]$json.tag_name).TrimStart('v', 'V')
-                ZipUrl  = if ($zipAsset) { [string]$zipAsset.browser_download_url } else { $null }
-                ZipName = if ($zipAsset) { [string]$zipAsset.name } else { $null }
+                Tag            = [string]$json.tag_name
+                Name           = [string]$json.name
+                Url            = [string]$json.html_url
+                Latest         = ([string]$json.tag_name).TrimStart('v', 'V')
+                ZipUrl         = if ($zipAsset) { [string]$zipAsset.browser_download_url } else { $null }
+                ZipName        = if ($zipAsset) { [string]$zipAsset.name } else { $null }
+                Sha256Url      = if ($sumAsset) { [string]$sumAsset.browser_download_url } else { $null }
+                DigestSha256   = $digest
+                ExpectedSha256 = $digest
             }
         } finally {
             $resp.Close()
@@ -415,6 +487,15 @@ function Test-AppUpdateAvailable {
     if ($cmp -lt 0) {
         return [pscustomobject]@{
             Status  = 'UpdateAvailable'
+            Release = $rel
+        }
+    }
+    if ($cmp -gt 0) {
+        if (-not $Silent) {
+            Write-Info ("Local build is newer than GitHub (v{0} > {1})" -f $Script:AppVersion, $rel.Tag)
+        }
+        return [pscustomobject]@{
+            Status  = 'NewerThanRelease'
             Release = $rel
         }
     }
@@ -470,6 +551,47 @@ function Invoke-AppSelfUpdate {
     }
     Write-Ok ("Downloaded {0}" -f $zipName)
 
+    # Prefer published .sha256 file (same order as Get.ps1), then GitHub asset digest
+    $expected = $null
+    if ($Release.Sha256Url) {
+        Write-Info "Fetching release checksum..."
+        Set-UiStatusText "Verifying checksum..."
+        Pump-Ui
+        $sumPath = Join-Path $work 'expected.sha256'
+        $sumDl = Invoke-WithUiWait -Activity "Downloading checksum" -TimeoutSec 60 -ArgumentList @($Release.Sha256Url, $sumPath) -ScriptBlock {
+            param([string]$Url, [string]$OutFile)
+            try {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                $wc = New-Object System.Net.WebClient
+                $wc.Headers.Add("User-Agent", "PC-Maintenance-Kit")
+                $wc.DownloadFile($Url, $OutFile)
+                if (Test-Path -LiteralPath $OutFile) { "OK" } else { "ERR:missing checksum file" }
+            } catch {
+                "ERR:" + $_.Exception.Message
+            }
+        }
+        $sumText = Get-AsyncResultText $sumDl
+        if ($sumText -eq "OK") {
+            $expected = Get-ExpectedSha256Text (Get-Content -LiteralPath $sumPath -Raw -EA SilentlyContinue)
+        } else {
+            Write-Warn "Could not download checksum file; trying release digest"
+        }
+    }
+    if (-not $expected) {
+        if ($Release.DigestSha256) { $expected = $Release.DigestSha256 }
+        elseif ($Release.ExpectedSha256) { $expected = $Release.ExpectedSha256 }
+    }
+
+    if (-not $expected) {
+        throw "Refusing to install update: no SHA256 checksum was published for this release."
+    }
+
+    $actual = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) {
+        throw ("SHA256 mismatch.`n  expected: {0}`n  actual:   {1}" -f $expected, $actual)
+    }
+    Write-Ok ("SHA256 OK  {0}" -f $actual)
+
     Write-Info "Extracting update..."
     Set-UiStatusText "Extracting update..."
     Pump-Ui
@@ -481,6 +603,14 @@ function Invoke-AppSelfUpdate {
         throw "Update ZIP is missing PC-Maintenance.ps1"
     }
     $payloadRoot = Split-Path -Parent $payloadPs1.FullName
+
+    # Reject silently-tampered signed scripts if any are Authenticode-signed
+    Get-ChildItem -LiteralPath $payloadRoot -Recurse -Filter *.ps1 -File -EA SilentlyContinue | ForEach-Object {
+        $sig = Get-AuthenticodeSignature -FilePath $_.FullName
+        if ($sig.Status -eq 'HashMismatch') {
+            throw ("Rejected {0}: file was signed but has been modified" -f $_.Name)
+        }
+    }
 
     $applyPs1 = Join-Path $work "Apply-Update.ps1"
     $startBat = Join-Path $Script:AppRoot "Start.bat"
@@ -567,12 +697,11 @@ function Show-UpdateAvailableDialog {
         } else {
             "A newer release is available.`n`nThis PC: v{0}`nLatest: {1}`n`nNo ZIP is attached to this release, so one-click update is unavailable.`nOpen GitHub releases page?" -f $Script:AppVersion, $Release.Tag
         }
-        $r = [System.Windows.Forms.MessageBox]::Show(
-            $msg,
-            "PC Maintenance Kit - Update",
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            [System.Windows.Forms.MessageBoxIcon]::Information
-        )
+        $r = Show-UiMessageBox `
+            -Text $msg `
+            -Caption "PC Maintenance Kit - Update" `
+            -Buttons ([System.Windows.Forms.MessageBoxButtons]::YesNo) `
+            -Icon ([System.Windows.Forms.MessageBoxIcon]::Information)
         if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
 
         if ($hasZip) {
@@ -581,12 +710,11 @@ function Show-UpdateAvailableDialog {
             } catch {
                 $Script:ExitAfterUpdate = $false
                 Write-Fail $_.Exception.Message
-                $fallback = [System.Windows.Forms.MessageBox]::Show(
-                    ("Automatic update failed:`n{0}`n`nOpen GitHub releases page instead?" -f $_.Exception.Message),
-                    "PC Maintenance Kit - Update",
-                    [System.Windows.Forms.MessageBoxButtons]::YesNo,
-                    [System.Windows.Forms.MessageBoxIcon]::Warning
-                )
+                $fallback = Show-UiMessageBox `
+                    -Text ("Automatic update failed:`n{0}`n`nOpen GitHub releases page instead?" -f $_.Exception.Message) `
+                    -Caption "PC Maintenance Kit - Update" `
+                    -Buttons ([System.Windows.Forms.MessageBoxButtons]::YesNo) `
+                    -Icon ([System.Windows.Forms.MessageBoxIcon]::Warning)
                 if ($fallback -eq [System.Windows.Forms.DialogResult]::Yes -and $Release.Url) {
                     Start-Process $Release.Url
                 }

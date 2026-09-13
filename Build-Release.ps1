@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 param(
-    [string]$Version = "5.1.6",
+    [string]$Version = "",
     [string]$CertThumbprint = $env:PCMK_SIGN_THUMBPRINT,
     [string]$PfxPath = "",
     [string]$PfxPassword = $env:PCMK_SIGN_PFX_PASSWORD
@@ -8,6 +8,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $Version) {
+    $versionFile = Join-Path $Root "VERSION"
+    if (Test-Path -LiteralPath $versionFile) {
+        $Version = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+    }
+}
+if (-not $Version) { $Version = "5.2.6" }
+
 $Dist = Join-Path $Root "dist"
 $Stage = Join-Path $Dist ("PC-Maintenance-Kit-v" + $Version)
 $Zip = Join-Path $Dist ("PC-Maintenance-Kit-v" + $Version + ".zip")
@@ -73,6 +81,10 @@ try {
     Copy-Item (Join-Path $Root "PC-Maintenance.ps1") $Stage
     Copy-Item (Join-Path $Root "README.md") $Stage
     Copy-Item (Join-Path $Root "LICENSE") $Stage
+    Copy-Item (Join-Path $Root "VERSION") $Stage
+    if (Test-Path -LiteralPath (Join-Path $Root "CHANGELOG.md")) {
+        Copy-Item (Join-Path $Root "CHANGELOG.md") $Stage
+    }
     Copy-Item (Join-Path $Root "lib\*.ps1") (Join-Path $Stage "lib")
 
     $cert = Get-SigningCertificate

@@ -9,6 +9,7 @@ $Script:DoRestorePoint = $true
 $Script:DoAmd = $false
 $Script:DoShaderCleanup = $true
 $Script:DoGamingOptimize = $true
+$Script:DoWuCacheWipe = $false
 $Script:TotalSteps = 0
 $Script:CurrentStep = 0
 $Script:RunStart = Get-Date
@@ -33,6 +34,7 @@ function Reset-MaintenanceFlags {
     $Script:DoAmd = $false
     $Script:DoShaderCleanup = $true
     $Script:DoGamingOptimize = $true
+    $Script:DoWuCacheWipe = $false
     $Script:TempOlderThanDays = 2
 }
 
@@ -83,7 +85,36 @@ function Enqueue-UiEvent {
     return $false
 }
 
+$Script:UiModalDepth = 0
+
+function Invoke-WithUiModal {
+    param([scriptblock]$Action)
+    if (-not $Action) { return $null }
+    $Script:UiModalDepth = [int]$Script:UiModalDepth + 1
+    try {
+        return & $Action
+    } finally {
+        $Script:UiModalDepth = [math]::Max(0, [int]$Script:UiModalDepth - 1)
+    }
+}
+
+function Show-UiMessageBox {
+    param(
+        [string]$Text,
+        [string]$Caption = "PC Maintenance Kit",
+        $Buttons = [System.Windows.Forms.MessageBoxButtons]::OK,
+        $Icon = [System.Windows.Forms.MessageBoxIcon]::Information
+    )
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -EA SilentlyContinue
+    } catch { }
+    return Invoke-WithUiModal {
+        [System.Windows.Forms.MessageBox]::Show($Text, $Caption, $Buttons, $Icon)
+    }
+}
+
 function Pump-Ui {
+    if ([int]$Script:UiModalDepth -gt 0) { return }
     $form = Get-UiControl Form
     if ($form -and -not $form.IsDisposed) {
         [System.Windows.Forms.Application]::DoEvents()
@@ -114,7 +145,12 @@ function Set-UiProgressValue([int]$Value) {
     $track = Get-UiControl ProgressTrack
     if ($fill -and $track) {
         $w = [math]::Max(0, [int](($track.ClientSize.Width * $pct) / 100.0))
-        $fill.Width = $w
+        # Full invalidate: WinForms only paints newly exposed strips on resize,
+        # which stacks old gradient segments into stripes.
+        if ($fill.Width -ne $w) {
+            $fill.Width = $w
+            $fill.Invalidate()
+        }
     }
 }
 
@@ -349,26 +385,31 @@ function Apply-ModeFlags {
             $Script:DoCleanup=$true; $Script:DoWinUpdate=$false; $Script:DoWinget=$false
             $Script:DoRepair=$false; $Script:DoRestorePoint=$true; $Script:DoAmd=$false
             $Script:DoShaderCleanup=$true; $Script:DoGamingOptimize=$true
+            $Script:DoWuCacheWipe=$false
         }
         'CleanupOnly' {
             $Script:DoCleanup=$true; $Script:DoWinUpdate=$false; $Script:DoWinget=$false
             $Script:DoRepair=$false; $Script:DoRestorePoint=$false; $Script:DoAmd=$false
             $Script:DoShaderCleanup=$true; $Script:DoGamingOptimize=$false
+            $Script:DoWuCacheWipe=$false
         }
         'UpdatesOnly' {
             $Script:DoCleanup=$false; $Script:DoWinUpdate=$true; $Script:DoWinget=$true
             $Script:DoRepair=$false; $Script:DoRestorePoint=$true; $Script:DoAmd=$true
             $Script:DoShaderCleanup=$false; $Script:DoGamingOptimize=$false
+            $Script:DoWuCacheWipe=$false
         }
         'Repair' {
             $Script:DoCleanup=$false; $Script:DoWinUpdate=$false; $Script:DoWinget=$false
             $Script:DoRepair=$true; $Script:DoRestorePoint=$true; $Script:DoAmd=$false
             $Script:DoShaderCleanup=$false; $Script:DoGamingOptimize=$false
+            $Script:DoWuCacheWipe=$false
         }
         'FullRepair' {
             $Script:DoCleanup=$true; $Script:DoWinUpdate=$true; $Script:DoWinget=$true
             $Script:DoRepair=$true; $Script:DoRestorePoint=$true; $Script:DoAmd=$true
             $Script:DoShaderCleanup=$true; $Script:DoGamingOptimize=$true
+            $Script:DoWuCacheWipe=$false
         }
     }
 }
@@ -484,7 +525,9 @@ function Invoke-TempCleanup {
     }
 
     try {
-        if ($Script:DoWinUpdate) {
+        if (-not $Script:DoWuCacheWipe) {
+            Write-Info "Skipped Windows Update download-cache wipe (opt-in on Cleanup tab)"
+        } elseif ($Script:DoWinUpdate) {
             Write-Info "Skipped Windows Update download-cache wipe (updates will run next)"
         } else {
             Write-Info "Clearing Windows Update download cache..."
@@ -523,45 +566,85 @@ function Invoke-TempCleanup {
     }
 }
 
+function Get-ChromiumProfileCachePaths {
+    param([string]$UserDataRoot)
+    $list = [System.Collections.Generic.List[string]]::new()
+    if ([string]::IsNullOrWhiteSpace($UserDataRoot) -or -not (Test-PathSafe $UserDataRoot)) {
+        return @()
+    }
+
+    # Shared GPU caches live under User Data (not inside a profile folder)
+    foreach ($rootSub in @('ShaderCache', 'GrShaderCache', 'GraphiteDawnCache')) {
+        $rp = Join-Path $UserDataRoot $rootSub
+        if (Test-PathSafe $rp) { [void]$list.Add($rp) }
+    }
+
+    $skip = @{
+        'Crashpad' = $true; 'ShaderCache' = $true; 'GrShaderCache' = $true; 'GraphiteDawnCache' = $true
+        'BrowserMetrics' = $true; 'Safe Browsing' = $true; 'CertificateRevocation' = $true
+        'Component Crx Cache' = $true; 'MEIPreload' = $true; 'OptimizationHints' = $true
+        'OriginTrials' = $true; 'PKIMetadata' = $true; 'SSLErrorAssistant' = $true
+        'Subresource Filter' = $true; 'TrustTokenKeyCommitments' = $true; 'hyphen-data' = $true
+        'WidevineCdm' = $true; 'ZxcvbnData' = $true; 'Dictionaries' = $true
+        'FileTypePolicies' = $true; 'Crowd Deny' = $true; 'AutofillStates' = $true
+        'FirstPartySetsPreloaded' = $true; 'OpenCookieDatabase' = $true
+        'PrivacySandboxAttestationsPreloaded' = $true; 'segmentation_platform' = $true
+        'AmountExtractionHeuristicRegexes' = $true; 'TOS' = $true
+    }
+
+    $profiles = @(Get-ChildItem -LiteralPath $UserDataRoot -Directory -EA SilentlyContinue | Where-Object {
+        if ($skip.ContainsKey($_.Name)) { return $false }
+        if ($_.Name -eq 'Default' -or $_.Name -eq 'Guest Profile' -or $_.Name -like 'Profile *' -or $_.Name -like 'Person *') {
+            return $true
+        }
+        # Heuristic: Chromium profile dirs usually have Preferences and/or a Cache folder
+        return (Test-PathSafe (Join-Path $_.FullName 'Preferences')) -or (Test-PathSafe (Join-Path $_.FullName 'Cache'))
+    })
+
+    foreach ($profile in $profiles) {
+        foreach ($sub in @('Cache', 'Code Cache', 'GPUCache', 'ShaderCache')) {
+            $p = Join-Path $profile.FullName $sub
+            if (Test-PathSafe $p) { [void]$list.Add($p) }
+        }
+    }
+    return @($list)
+}
+
+function Get-BrowserCachePaths {
+    $map = [ordered]@{}
+    $chromium = [ordered]@{
+        Brave  = "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data"
+        Chrome = "$env:LOCALAPPDATA\Google\Chrome\User Data"
+        Edge   = "$env:LOCALAPPDATA\Microsoft\Edge\User Data"
+    }
+    foreach ($name in $chromium.Keys) {
+        $paths = @(Get-ChromiumProfileCachePaths -UserDataRoot $chromium[$name])
+        if ($paths.Count -gt 0) { $map[$name] = $paths }
+    }
+    $ffRoot = "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles"
+    if (Test-PathSafe $ffRoot) {
+        $ff = [System.Collections.Generic.List[string]]::new()
+        Get-ChildItem -LiteralPath $ffRoot -Directory -EA SilentlyContinue | ForEach-Object {
+            $cache = Join-Path $_.FullName 'cache2'
+            if (Test-PathSafe $cache) { [void]$ff.Add($cache) }
+        }
+        if ($ff.Count -gt 0) { $map['Firefox'] = @($ff) }
+    }
+    return $map
+}
+
 function Invoke-BrowserCacheCleanup {
-    Write-Step "Cleaning browser caches"
+    Write-Step "Cleaning browser caches (all profiles)"
     Write-Info "Close browsers for best results (locked files are skipped)"
     $total = 0L
-    $browserPaths = [ordered]@{
-        'Brave'   = @(
-            "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache",
-            "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Code Cache",
-            "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\GPUCache",
-            "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\ShaderCache"
-        )
-        'Chrome'  = @(
-            "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache",
-            "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Code Cache",
-            "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\GPUCache"
-        )
-        'Edge'    = @(
-            "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache",
-            "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Code Cache",
-            "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\GPUCache"
-        )
-        'Firefox' = @("$env:LOCALAPPDATA\Mozilla\Firefox\Profiles")
-    }
+    $browserPaths = Get-BrowserCachePaths
 
     foreach ($browser in $browserPaths.Keys) {
         Write-Info "Checking $browser..."
         $freedBrowser = 0L
         foreach ($p in $browserPaths[$browser]) {
-            if (-not (Test-Path $p)) { continue }
-            if ($browser -eq 'Firefox') {
-                Get-ChildItem $p -Directory -EA SilentlyContinue | ForEach-Object {
-                    $cache = Join-Path $_.FullName "cache2"
-                    if (Test-Path $cache) {
-                        $freedBrowser += Remove-OldFilesInPath -Path $cache -OlderThanDays 0 -DeleteFoldersToo
-                    }
-                }
-            } else {
-                $freedBrowser += Remove-OldFilesInPath -Path $p -OlderThanDays 0 -DeleteFoldersToo
-            }
+            if (-not (Test-PathSafe $p)) { continue }
+            $freedBrowser += Remove-OldFilesInPath -Path $p -OlderThanDays 0 -DeleteFoldersToo
         }
         if ($freedBrowser -gt 0) {
             $total += $freedBrowser
@@ -640,8 +723,22 @@ function Invoke-WindowsUpdate {
                 try {
                     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
                     Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -EA SilentlyContinue | Out-Null
-                    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -EA SilentlyContinue
-                    Install-Module PSWindowsUpdate -Force -Confirm:$false -Scope AllUsers -EA Stop
+                    $prevPolicy = 'Untrusted'
+                    try {
+                        $repo = Get-PSRepository -Name PSGallery -EA SilentlyContinue
+                        if ($repo -and $repo.InstallationPolicy) {
+                            $prevPolicy = [string]$repo.InstallationPolicy
+                        }
+                    } catch { }
+                    try {
+                        # Temporarily trust PSGallery for a non-interactive install, then restore.
+                        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -EA SilentlyContinue
+                        Install-Module PSWindowsUpdate -Force -Confirm:$false -Scope AllUsers -EA Stop
+                    } finally {
+                        if ($prevPolicy -ne 'Trusted') {
+                            Set-PSRepository -Name PSGallery -InstallationPolicy $prevPolicy -EA SilentlyContinue
+                        }
+                    }
                     "OK"
                 } catch {
                     "ERR:" + $_.Exception.Message
@@ -867,11 +964,12 @@ function Invoke-WingetUpdates {
     try {
         Assert-NotCancelled
         $winget = (Get-Command winget -EA Stop).Source
-        Write-Info "Listing available winget upgrades..."
+        Write-Info "Listing available upgrades (winget source only - faster)..."
         # No --include-unknown: that flag makes apps like Roblox look upgradeable forever
+        # --source winget skips slow msstore queries on every list/upgrade
         $listObj = Invoke-WithUiWait -Activity "winget list upgrades" -TimeoutSec 300 -ArgumentList @($winget) -ScriptBlock {
             param([string]$WingetPath)
-            $text = & $WingetPath upgrade --disable-interactivity 2>&1 | Out-String
+            $text = & $WingetPath upgrade --source winget --disable-interactivity --accept-source-agreements 2>&1 | Out-String
             [pscustomobject]@{ Output = $text; ExitCode = $LASTEXITCODE }
         }
         if ($null -eq $listObj) {
@@ -948,39 +1046,34 @@ function Invoke-WingetUpdates {
         $countFromFooter = 0
         if ($listOut -match '(\d+)\s+upgrades?\s+available') { $countFromFooter = [int]$Matches[1] }
         $count = $packageIds.Count
-        $useUpgradeAll = $false
         if ($count -eq 0) {
-            if ($countFromFooter -gt 0) {
-                # Could not parse Ids (unusual layout) - upgrade all known versions, still no --include-unknown
-                Write-Warn "Could not parse package Ids from winget table - upgrading all applicable packages"
-                $useUpgradeAll = $true
-                $count = $countFromFooter
-            } else {
-                Write-Ok "winget apps are up to date"
+            if ($skipped.Count -gt 0) {
+                Write-Ok "winget apps are up to date (only self-updating apps had upgrades; those are skipped)"
                 return
             }
+            if ($countFromFooter -gt 0) {
+                Write-Warn "Could not parse package Ids from winget table - refusing bulk upgrade for safety"
+                Write-Info "Re-run later, or upgrade specific apps with: winget upgrade --id <Id>"
+                return
+            }
+            Write-Ok "winget apps are up to date"
+            return
         }
 
-        if (-not $useUpgradeAll) {
-            Write-Info ("Found {0} upgradeable package(s): {1}" -f $count, ($packageIds -join ", "))
-        } else {
-            Write-Info ("Found {0} upgradeable package(s)" -f $count)
-        }
+        Write-Info ("Found {0} upgradeable package(s): {1}" -f $count, ($packageIds -join ", "))
         $preview = ($packageLines | Select-Object -First 12) -join "`n"
         if ($packageLines.Count -gt 12) { $preview += "`n..." }
 
         $proceed = $true
         if (-not $Script:SkipWingetConfirm) {
-            $msg = "winget will upgrade $count package(s).`n`nThis can update browsers, runtimes, and other apps.`nSelf-updaters (Roblox, Discord, Steam, Epic) are skipped.`n`nContinue?"
+            $msg = "winget will upgrade $count package(s) from the winget source (silent bulk upgrade).`n`nThis can update browsers, runtimes, and other apps.`nSelf-updaters (Roblox, Discord, Steam, Epic) are skipped.`n`nContinue?"
             if ($preview) { $msg += "`n`n" + $preview }
             try {
-                Add-Type -AssemblyName System.Windows.Forms -EA Stop
-                $r = [System.Windows.Forms.MessageBox]::Show(
-                    $msg,
-                    "Confirm winget upgrades",
-                    [System.Windows.Forms.MessageBoxButtons]::YesNo,
-                    [System.Windows.Forms.MessageBoxIcon]::Question
-                )
+                $r = Show-UiMessageBox `
+                    -Text $msg `
+                    -Caption "Confirm winget upgrades" `
+                    -Buttons ([System.Windows.Forms.MessageBoxButtons]::YesNo) `
+                    -Icon ([System.Windows.Forms.MessageBoxIcon]::Question)
                 $proceed = ($r -eq [System.Windows.Forms.DialogResult]::Yes)
             } catch {
                 Write-Host $msg
@@ -994,24 +1087,35 @@ function Invoke-WingetUpdates {
         }
 
         Assert-NotCancelled
-        Write-Info "Installing winget upgrades (background)..."
-        # Pass Ids as one string - PowerShell flattens arrays in -ArgumentList
-        $idsJoined = if ($useUpgradeAll) { "" } else { [string]::Join("`n", [string[]]@($packageIds)) }
-        $outObj = Invoke-WithUiWait -Activity "winget upgrade" -TimeoutSec 1200 -ArgumentList @($winget, $idsJoined) -ScriptBlock {
-            param([string]$WingetPath, [string]$IdsJoined)
-            $parts = New-Object System.Collections.Generic.List[string]
-            $ok = 0
-            $fail = 0
-            $okIds = New-Object System.Collections.Generic.List[string]
-            $failIds = New-Object System.Collections.Generic.List[string]
+        Write-Info "Installing winget upgrades (bulk silent - much faster)..."
+        $idsJoined = [string]::Join("`n", [string[]]@($packageIds))
+        $skipJoined = [string]::Join("`n", [string[]]@($wingetSkipIds))
+        $skippedJoined = [string]::Join("`n", [string[]]@($skipped))
+        $outObj = Invoke-WithUiWait -Activity "winget upgrade" -TimeoutSec 1800 -ArgumentList @($winget, $skipJoined, $skippedJoined, $idsJoined) -ScriptBlock {
+            param([string]$WingetPath, [string]$SkipJoined, [string]$SkippedJoined, [string]$IdsJoined)
+            $skipIds = @()
+            if ($SkipJoined -and $SkipJoined.Trim()) {
+                $skipIds = @($SkipJoined -split "`n" | Where-Object { $_ -and $_.Trim() })
+            }
+            $mustPin = @()
+            if ($SkippedJoined -and $SkippedJoined.Trim()) {
+                $mustPin = @($SkippedJoined -split "`n" | Where-Object { $_ -and $_.Trim() })
+            }
             $Ids = @()
             if ($IdsJoined -and $IdsJoined.Trim()) {
                 $Ids = @($IdsJoined -split "`n" | Where-Object { $_ -and $_.Trim() })
             }
-            if ($Ids.Count -gt 0) {
+
+            function Invoke-WingetPerIdUpgrade {
+                param([string]$WingetPath, [string[]]$Ids)
+                $parts = New-Object System.Collections.Generic.List[string]
+                $ok = 0
+                $fail = 0
+                $okIds = New-Object System.Collections.Generic.List[string]
+                $failIds = New-Object System.Collections.Generic.List[string]
                 foreach ($id in $Ids) {
                     [void]$parts.Add(("--- upgrading {0} ---" -f $id))
-                    $text = & $WingetPath upgrade --id $id --exact --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+                    $text = & $WingetPath upgrade --id $id --exact --source winget --silent --disable-interactivity --accept-package-agreements --accept-source-agreements 2>&1 | Out-String
                     [void]$parts.Add($text)
                     if ($text -match "Successfully installed") {
                         $ok++
@@ -1026,27 +1130,73 @@ function Invoke-WingetUpdates {
                         [void]$failIds.Add($id)
                     }
                 }
-            } else {
-                # No --include-unknown: avoids endless Roblox/"unknown version" upgrades
-                $text = & $WingetPath upgrade --all --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-String
-                [void]$parts.Add($text)
-                $ok = ([regex]::Matches($text, "Successfully installed")).Count
-                if ($ok -eq 0 -and $text -match "does not apply to your system") {
-                    $fail = 1
-                    [void]$failIds.Add("(some packages not applicable)")
-                } elseif ($ok -eq 0 -and $text -notmatch "No applicable upgrade|No newer package versions|No installed package found") {
-                    if ($LASTEXITCODE -ne 0) {
-                        $fail = 1
-                        [void]$failIds.Add("upgrade --all")
-                    }
+                return [pscustomobject]@{
+                    Mode      = 'PerId'
+                    Output    = ($parts -join "`n")
+                    OkCount   = $ok
+                    FailCount = $fail
+                    OkIds     = ($okIds -join ", ")
+                    FailIds   = ($failIds -join ", ")
                 }
             }
-            [pscustomobject]@{
-                Output    = ($parts -join "`n")
-                OkCount   = $ok
-                FailCount = $fail
-                OkIds     = ($okIds -join ", ")
-                FailIds   = ($failIds -join ", ")
+
+            # Snapshot pins so we only remove ones we add
+            $pinList = & $WingetPath pin list --disable-interactivity 2>&1 | Out-String
+            $alreadyPinned = @{}
+            foreach ($s in $skipIds) {
+                if ($pinList -and ($pinList -match [regex]::Escape($s))) {
+                    $alreadyPinned[$s] = $true
+                }
+            }
+
+            $addedPins = New-Object System.Collections.Generic.List[string]
+            $pinBlockFailed = New-Object System.Collections.Generic.List[string]
+            try {
+                foreach ($s in $skipIds) {
+                    if ($alreadyPinned.ContainsKey($s)) { continue }
+                    $pinOut = & $WingetPath pin add --id $s --exact --blocking --disable-interactivity --accept-source-agreements 2>&1 | Out-String
+                    $pinOk = ($LASTEXITCODE -eq 0) -or ($pinOut -match '(?i)pin added|already exists|already pinned')
+                    if ($pinOk) {
+                        [void]$addedPins.Add($s)
+                    } elseif ($mustPin -contains $s) {
+                        # This self-updater has an available upgrade and we could not pin it -
+                        # refuse bulk --all so we do not upgrade it by accident.
+                        [void]$pinBlockFailed.Add($s)
+                    }
+                }
+
+                if ($pinBlockFailed.Count -gt 0) {
+                    $fallback = Invoke-WingetPerIdUpgrade -WingetPath $WingetPath -Ids $Ids
+                    $fallback | Add-Member -NotePropertyName Note -NotePropertyValue ("Bulk skipped; could not pin: " + ($pinBlockFailed -join ', ')) -Force
+                    return $fallback
+                }
+
+                $bulkText = & $WingetPath upgrade --all --source winget --silent --disable-interactivity --accept-package-agreements --accept-source-agreements 2>&1 | Out-String
+                $bulkExit = $LASTEXITCODE
+                $ok = ([regex]::Matches($bulkText, 'Successfully installed')).Count
+                $upToDate = ($bulkText -match 'No applicable upgrade|No newer package versions|No installed package found matching input criteria') -and ($ok -eq 0)
+
+                if ($ok -gt 0 -or $upToDate -or $bulkExit -eq 0) {
+                    return [pscustomobject]@{
+                        Mode      = 'Bulk'
+                        Output    = $bulkText
+                        OkCount   = $ok
+                        FailCount = 0
+                        OkIds     = ''
+                        FailIds   = ''
+                        Note      = 'Bulk silent upgrade (--source winget)'
+                    }
+                }
+
+                # Bulk failed hard - fall back to per-id (still skips self-updaters)
+                $fallback = Invoke-WingetPerIdUpgrade -WingetPath $WingetPath -Ids $Ids
+                $fallback | Add-Member -NotePropertyName Note -NotePropertyValue 'Bulk failed; used per-id fallback' -Force
+                $fallback.Output = ("--- bulk attempt ---`n" + $bulkText + "`n" + $fallback.Output)
+                return $fallback
+            } finally {
+                foreach ($s in @($addedPins)) {
+                    & $WingetPath pin remove --id $s --exact --disable-interactivity --accept-source-agreements 2>&1 | Out-Null
+                }
             }
         }
         if ($null -eq $outObj) {
@@ -1058,11 +1208,15 @@ function Invoke-WingetUpdates {
         $okCount = 0
         $failCount = 0
         $failIds = ""
+        $mode = ""
+        $note = ""
         try {
             $out = [string]$outPayload.Output
             $okCount = [int]$outPayload.OkCount
             $failCount = [int]$outPayload.FailCount
             $failIds = [string]$outPayload.FailIds
+            try { $mode = [string]$outPayload.Mode } catch { }
+            try { $note = [string]$outPayload.Note } catch { }
         } catch {
             $out = Get-AsyncResultText $outObj
             if ($out -match "Successfully installed") {
@@ -1070,13 +1224,16 @@ function Invoke-WingetUpdates {
             }
         }
 
-        if ($okCount -gt 0) {
+        if ($note) { Write-Info $note }
+        if ($mode -eq 'Bulk' -and $okCount -eq 0 -and $failCount -eq 0) {
+            Write-Ok "winget bulk upgrade finished (apps current or already newest)"
+        } elseif ($okCount -gt 0) {
             Write-Ok ("winget upgraded {0} package(s)" -f $okCount)
         }
         if ($failCount -gt 0) {
             Write-Warn ("winget failed for {0} package(s): {1}" -f $failCount, $(if ($failIds) { $failIds } else { "check the activity panel" }))
         }
-        if ($okCount -eq 0 -and $failCount -eq 0) {
+        if ($okCount -eq 0 -and $failCount -eq 0 -and $mode -ne 'Bulk') {
             Write-Ok "winget apps are up to date"
         } elseif ($okCount -eq 0 -and $failCount -gt 0) {
             Write-Warn "No packages were upgraded"
@@ -1288,13 +1445,11 @@ function Invoke-NvidiaAppOpen {
 function Show-RebootRecommendedDialog {
     if (-not (Test-RebootPending)) { return }
     try {
-        Add-Type -AssemblyName System.Windows.Forms -EA SilentlyContinue
-        [System.Windows.Forms.MessageBox]::Show(
-            "Windows has a pending restart (often after updates).`n`nRestart when you finish gaming for best stability.",
-            "PC Maintenance - Restart recommended",
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Information
-        ) | Out-Null
+        [void](Show-UiMessageBox `
+            -Text "Windows has a pending restart (often after updates).`n`nRestart when you finish gaming for best stability." `
+            -Caption "PC Maintenance - Restart recommended" `
+            -Buttons ([System.Windows.Forms.MessageBoxButtons]::OK) `
+            -Icon ([System.Windows.Forms.MessageBoxIcon]::Information))
     } catch { }
 }
 
@@ -1363,6 +1518,37 @@ function Invoke-GamingChecks {
     } else {
         Write-Ok "No pending restart detected"
     }
+}
+
+function Confirm-RepairAction {
+    param(
+        [string]$ModeName = 'Repair',
+        [switch]$Gui
+    )
+    $label = if ($ModeName -eq 'FullRepair') {
+        'Full Repair (cleanup + updates + DISM/SFC)'
+    } else {
+        'Windows Repair (DISM + SFC)'
+    }
+    if ($Gui) {
+        try {
+            $r = Show-UiMessageBox `
+                -Text ("{0}`n`nThis can take 15-60+ minutes and may require a restart.`nA restore point is recommended.`nYou can press Stop to abort.`n`nContinue?" -f $label) `
+                -Caption "Confirm repair" `
+                -Buttons ([System.Windows.Forms.MessageBoxButtons]::YesNo) `
+                -Icon ([System.Windows.Forms.MessageBoxIcon]::Warning)
+            return ($r -eq [System.Windows.Forms.DialogResult]::Yes)
+        } catch {
+            return $false
+        }
+    }
+
+    Write-Host ""
+    Write-Host ("  WARNING: {0}" -f $label) -ForegroundColor Yellow
+    Write-Host "  This can take a long time and may require a restart." -ForegroundColor DarkYellow
+    Write-Host "  Type YES (all caps) to continue, anything else to cancel." -ForegroundColor DarkGray
+    $ans = Read-Host "  Confirm"
+    return ($ans -eq 'YES')
 }
 
 function Invoke-Repair {
