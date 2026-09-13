@@ -100,13 +100,18 @@ $browserErr = $null
 try { $null = Get-BrowserCachePaths } catch { $browserErr = $_ }
 Assert-True ($null -eq $browserErr) 'Get-BrowserCachePaths does not throw'
 
-# Root ShaderCache should be discoverable when present under a fake User Data tree
+# Root ShaderCache + Guest Profile should be discoverable under a fake User Data tree
 $fakeUd = Join-Path $env:TEMP ('pcmk-chrome-ud-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Path (Join-Path $fakeUd 'ShaderCache') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $fakeUd 'Guest Profile\Cache') -Force | Out-Null
 $chromPaths = @(Get-ChromiumProfileCachePaths -UserDataRoot $fakeUd)
-Assert-True ($chromPaths -contains (Join-Path $fakeUd 'ShaderCache')) 'Chromium root ShaderCache included'
-Assert-True ($chromPaths -contains (Join-Path $fakeUd 'Guest Profile\Cache')) 'Guest Profile Cache included'
+function Get-FullPathNorm([string]$p) {
+    if ([string]::IsNullOrWhiteSpace($p)) { return '' }
+    return [System.IO.Path]::GetFullPath($p).TrimEnd('\', '/').ToLowerInvariant()
+}
+$chromNorm = @($chromPaths | ForEach-Object { Get-FullPathNorm $_ })
+Assert-True ($chromNorm -contains (Get-FullPathNorm (Join-Path $fakeUd 'ShaderCache'))) 'Chromium root ShaderCache included'
+Assert-True ($chromNorm -contains (Get-FullPathNorm (Join-Path $fakeUd 'Guest Profile\Cache'))) 'Guest Profile Cache included'
 Remove-Item -LiteralPath $fakeUd -Recurse -Force -EA SilentlyContinue
 
 $previewErr = $null

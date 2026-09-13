@@ -593,12 +593,17 @@ function Get-ChromiumProfileCachePaths {
     }
 
     $profiles = @(Get-ChildItem -LiteralPath $UserDataRoot -Directory -EA SilentlyContinue | Where-Object {
-        if ($skip.ContainsKey($_.Name)) { return $false }
-        if ($_.Name -eq 'Default' -or $_.Name -eq 'Guest Profile' -or $_.Name -like 'Profile *' -or $_.Name -like 'Person *') {
-            return $true
+        $name = $_.Name
+        if ($skip.ContainsKey($name)) {
+            $false
         }
-        # Heuristic: Chromium profile dirs usually have Preferences and/or a Cache folder
-        return (Test-PathSafe (Join-Path $_.FullName 'Preferences')) -or (Test-PathSafe (Join-Path $_.FullName 'Cache'))
+        elseif ($name -eq 'Default' -or $name -eq 'Guest Profile' -or $name -like 'Profile *' -or $name -like 'Person *') {
+            $true
+        }
+        else {
+            # Heuristic: Chromium profile dirs usually have Preferences and/or a Cache folder
+            (Test-PathSafe (Join-Path $_.FullName 'Preferences')) -or (Test-PathSafe (Join-Path $_.FullName 'Cache'))
+        }
     })
 
     foreach ($profile in $profiles) {
