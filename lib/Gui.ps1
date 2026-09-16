@@ -1489,6 +1489,33 @@ function Show-MaintenanceGui {
         Update-GuiStatusBar -JobText "Cancelling..."
     })
 
+    # Page controls live in GuiControls (builders returned); alias locals for handler wiring
+    $c = $Script:GuiControls
+    $btnWeekly = $c.BtnWeekly
+    $btnFixMyPc = $c.BtnFixMyPc
+    $btnRefreshHome = $c.BtnRefreshHome
+    $btnPresetGamer = $c.BtnPresetGamer
+    $btnPresetQuiet = $c.BtnPresetQuiet
+    $btnPresetFull = $c.BtnPresetFull
+    $btnPreview = $c.BtnPreview
+    $btnCleanup = $c.BtnCleanup
+    $btnUpdates = $c.BtnUpdates
+    $btnAmd = $c.BtnAmd
+    $btnNv = $c.BtnNv
+    $btnGamingOpt = $c.BtnGamingOpt
+    $btnApplyOptFixes = $c.BtnApplyOptFixes
+    $btnScanScore = $c.BtnScanScore
+    $btnFixPower = $c.BtnFixPower
+    $btnDiscordOff = $c.BtnDiscordOff
+    $btnRefreshGame = $c.BtnRefreshGame
+    $btnRepair = $c.BtnRepair
+    $btnRestoreOnly = $c.BtnRestoreOnly
+    $btnRefreshDevice = $c.BtnRefreshDevice
+    $btnCheckUpdate = $c.BtnCheckUpdate
+    $btnCopyRamTip = $c.BtnCopyRamTip
+    $btnOpenStorage = $c.BtnOpenStorage
+    $btnRestartNow = $c.BtnRestartNow
+
     $btnWeekly.Add_Click({
         if ($Script:GuiBusy) { return }
         Save-GuiSettings $Script:GuiControls
