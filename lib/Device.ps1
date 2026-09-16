@@ -1,3 +1,4 @@
+#Requires -Version 5.1
 $Script:DeviceSummaryCache = $null
 $Script:DeviceSummaryCacheUtc = [datetime]::MinValue
 
@@ -137,7 +138,15 @@ function Format-DeviceSummaryText {
     $s = Get-DeviceSummary
     $rebootLine = if ($s.RebootPending) { "YES - restart recommended" } else { "No" }
     $ramPartLine = if ($s.RamPartNumber) { "RAM part:   $($s.RamPartNumber)" } else { $null }
-    $lines = @(
+    $optLine = $null
+    try {
+        if (Get-Command Format-OptimizationScoreText -EA SilentlyContinue) {
+            $optLine = Format-OptimizationScoreText -Short
+        }
+    } catch { }
+    $lines = @()
+    if ($optLine) { $lines += $optLine; $lines += "" }
+    $lines += @(
         "CPU:        $($s.Cpu)"
         "GPU:        $($s.Gpu)"
         "RAM:        $($s.RamGb) GB ($($s.RamSticks) stick(s)) - $($s.RamChannels)"

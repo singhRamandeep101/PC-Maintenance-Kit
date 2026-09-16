@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
-    [ValidateSet('Gui','Cli','Full','CleanupOnly','UpdatesOnly','Repair','FullRepair')]
+    [ValidateSet('Gui','Cli','Full','CleanupOnly','UpdatesOnly','Repair','FullRepair','Scheduled')]
     [string]$Mode = 'Gui',
     [int]$TempOlderThanDays = 2
 )
@@ -22,7 +22,9 @@ try {
     . (Join-Path $Script:AppRoot "lib\Core.ps1")
     . (Join-Path $Script:AppRoot "lib\Gaming.ps1")
     . (Join-Path $Script:AppRoot "lib\Device.ps1")
+    . (Join-Path $Script:AppRoot "lib\Score.ps1")
     . (Join-Path $Script:AppRoot "lib\Extras.ps1")
+    . (Join-Path $Script:AppRoot "lib\Care.ps1")
     . (Join-Path $Script:AppRoot "lib\Gui.ps1")
 
     $relaunch = "-Mode $Mode"
@@ -40,7 +42,18 @@ try {
         'Cli' {
             Show-CliMenu
         }
+        'Scheduled' {
+            # Headless weekly care: uses saved Home checkbox prefs (or Gamer defaults)
+            Apply-ScheduledCareFlags
+            [void](Invoke-MaintenanceRun)
+        }
         default {
+            if ($Mode -eq 'Repair' -or $Mode -eq 'FullRepair') {
+                if (-not (Confirm-RepairAction -ModeName $Mode)) {
+                    Write-Host "  Repair cancelled." -ForegroundColor Yellow
+                    exit 0
+                }
+            }
             Apply-ModeFlags -ModeName $Mode
             [void](Invoke-MaintenanceRun)
             Write-Host ""

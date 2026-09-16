@@ -1,5 +1,25 @@
 #Requires -Version 5.1
-$Script:AppVersion = "5.1.6"
+function Get-KitVersion {
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    if ($Script:AppRoot) { [void]$candidates.Add((Join-Path $Script:AppRoot 'VERSION')) }
+    if ($PSScriptRoot) {
+        [void]$candidates.Add((Join-Path (Split-Path -Parent $PSScriptRoot) 'VERSION'))
+        [void]$candidates.Add((Join-Path $PSScriptRoot 'VERSION'))
+    }
+    foreach ($path in $candidates) {
+        if ($path -and (Test-Path -LiteralPath $path -EA SilentlyContinue)) {
+            try {
+                $raw = (Get-Content -LiteralPath $path -Raw -EA Stop).Trim()
+                if ($raw -match '^\d+(\.\d+){1,3}$') { return $raw }
+            } catch { }
+        }
+    }
+    # No VERSION file means a broken/partial install - report it rather than
+    # inventing a number that drifts out of sync with the real release.
+    return '0.0.0'
+}
+
+$Script:AppVersion = Get-KitVersion
 $Script:GitHubRepo = "singhRamandeep101/PC-Maintenance-Kit"
 
 function Get-AppDataDirectory {
@@ -38,11 +58,14 @@ function Get-DefaultGuiSettings {
         CleanSteam      = $false
         CleanEpic       = $false
         CleanRiot       = $false
+        CleanWuCache    = $false
         UpdRestore      = $true
         UpdWU           = $true
         UpdWinget       = $true
         RepRestore      = $true
         CheckUpdatesOnStart = $true
+        CarePreset      = 'Gamer'
+        ScheduleWeekly  = $false
     }
 }
 
@@ -50,10 +73,6 @@ function Save-GuiSettings {
     param($Controls)
     if (-not $Controls) { return }
     try {
-        $checkUpdates = $true
-        if ($Script:LoadedGuiSettings -and $null -ne $Script:LoadedGuiSettings.CheckUpdatesOnStart) {
-            $checkUpdates = [bool]$Script:LoadedGuiSettings.CheckUpdatesOnStart
-        }
         $obj = [ordered]@{
             HomeRestore     = [bool]$Controls.ChkHomeRestore.Checked
             HomeShader      = [bool]$Controls.ChkHomeShader.Checked
@@ -65,17 +84,29 @@ function Save-GuiSettings {
             CleanSteam      = [bool]$Controls.ChkSteam.Checked
             CleanEpic       = [bool]$Controls.ChkEpic.Checked
             CleanRiot       = [bool]$Controls.ChkRiot.Checked
+            CleanWuCache    = [bool]$Controls.ChkWuCache.Checked
             UpdRestore      = [bool]$Controls.ChkUpdRestore.Checked
             UpdWU           = [bool]$Controls.ChkUpdWU.Checked
             UpdWinget       = [bool]$Controls.ChkUpdWinget.Checked
             RepRestore      = [bool]$Controls.ChkRepRestore.Checked
-            CheckUpdatesOnStart = $checkUpdates
+        }
+        # Carry forward every key that has no control behind it, including keys
+        # written by a newer build, so a save never silently drops settings.
+        if ($Script:LoadedGuiSettings) {
+            foreach ($k in @($Script:LoadedGuiSettings.Keys)) {
+                if (-not $obj.Contains($k)) { $obj[$k] = $Script:LoadedGuiSettings[$k] }
+            }
+        }
+        foreach ($k in (Get-DefaultGuiSettings).Keys) {
+            if (-not $obj.Contains($k)) { $obj[$k] = (Get-DefaultGuiSettings)[$k] }
         }
         $Script:LoadedGuiSettings = $obj
         $json = ($obj | ConvertTo-Json -Depth 5)
         $utf8 = New-Object System.Text.UTF8Encoding $false
         [System.IO.File]::WriteAllText((Get-GuiSettingsPath), $json, $utf8)
-    } catch { }
+    } catch {
+        Write-Warn ("Could not save GUI settings: {0}" -f $_.Exception.Message)
+    }
 }
 
 function Load-GuiSettings {
@@ -85,37 +116,61 @@ function Load-GuiSettings {
     try {
         $raw = [System.IO.File]::ReadAllText($path)
         $j = $raw | ConvertFrom-Json
-        foreach ($k in $defaults.Keys) {
-            if ($null -ne $j.PSObject.Properties[$k]) {
-                $defaults[$k] = $j.$k
-            }
+        # Overlay everything on disk, including keys this build does not know,
+        # so downgrading then upgrading does not lose a newer build's settings.
+        foreach ($prop in $j.PSObject.Properties) {
+            $defaults[$prop.Name] = $prop.Value
         }
     } catch { }
     return $defaults
 }
 
+function Get-GuiSettingControlMap {
+    return [ordered]@{
+        ChkHomeRestore  = 'HomeRestore'
+        ChkHomeShader   = 'HomeShader'
+        ChkHomeGaming   = 'HomeGaming'
+        ChkHomeWU       = 'HomeWU'
+        ChkHomeWinget   = 'HomeWinget'
+        ChkCleanShader  = 'CleanShader'
+        ChkSteam        = 'CleanSteam'
+        ChkEpic         = 'CleanEpic'
+        ChkRiot         = 'CleanRiot'
+        ChkWuCache      = 'CleanWuCache'
+        ChkUpdRestore   = 'UpdRestore'
+        ChkUpdWU        = 'UpdWU'
+        ChkUpdWinget    = 'UpdWinget'
+        ChkRepRestore   = 'RepRestore'
+    }
+}
+
 function Apply-GuiSettings {
     param($Controls, $Settings)
     if (-not $Controls -or -not $Settings) { return }
+
+    # Each setting is applied independently - one bad value used to abort the
+    # whole restore silently and leave the rest of the UI on its defaults.
+    $failed = [System.Collections.Generic.List[string]]::new()
+    $map = Get-GuiSettingControlMap
+    foreach ($ctrlName in $map.Keys) {
+        $key = $map[$ctrlName]
+        $ctrl = $Controls.$ctrlName
+        if (-not $ctrl) { continue }
+        try { $ctrl.Checked = [bool]$Settings.$key } catch { [void]$failed.Add($key) }
+    }
+
     try {
-        $Controls.ChkHomeRestore.Checked = [bool]$Settings.HomeRestore
-        $Controls.ChkHomeShader.Checked  = [bool]$Settings.HomeShader
-        $Controls.ChkHomeGaming.Checked  = [bool]$Settings.HomeGaming
-        $Controls.ChkHomeWU.Checked      = [bool]$Settings.HomeWU
-        $Controls.ChkHomeWinget.Checked  = [bool]$Settings.HomeWinget
         $days = [int]$Settings.TempOlderDays
         if ($days -lt 0) { $days = 0 }
         if ($days -gt 30) { $days = 30 }
-        $Controls.DaysNum.Value = $days
-        $Controls.ChkCleanShader.Checked = [bool]$Settings.CleanShader
-        $Controls.ChkSteam.Checked       = [bool]$Settings.CleanSteam
-        $Controls.ChkEpic.Checked        = [bool]$Settings.CleanEpic
-        $Controls.ChkRiot.Checked        = [bool]$Settings.CleanRiot
-        $Controls.ChkUpdRestore.Checked  = [bool]$Settings.UpdRestore
-        $Controls.ChkUpdWU.Checked       = [bool]$Settings.UpdWU
-        $Controls.ChkUpdWinget.Checked   = [bool]$Settings.UpdWinget
-        $Controls.ChkRepRestore.Checked  = [bool]$Settings.RepRestore
-    } catch { }
+        if ($Controls.DaysNum) { $Controls.DaysNum.Value = $days }
+    } catch {
+        [void]$failed.Add('TempOlderDays')
+    }
+
+    if ($failed.Count -gt 0) {
+        Write-Warn ("Could not restore {0} setting(s): {1}" -f $failed.Count, ($failed -join ', '))
+    }
 }
 
 function Get-FolderSizeBytes {
@@ -160,7 +215,8 @@ function Get-CleanupPreview {
         [bool]$Shaders = $true,
         [bool]$Steam = $false,
         [bool]$Epic = $false,
-        [bool]$Riot = $false
+        [bool]$Riot = $false,
+        [bool]$WuCache = $false
     )
     $rows = [System.Collections.Generic.List[object]]::new()
     $total = 0L
@@ -184,6 +240,20 @@ function Get-CleanupPreview {
             Bytes = $bytes
             Size  = if ($bytes -ge 1MB) { "{0:N1} MB" -f ($bytes / 1MB) } else { "{0:N0} KB" -f ($bytes / 1KB) }
         })
+    }
+
+    $browserMap = Get-BrowserCachePaths
+    foreach ($browser in $browserMap.Keys) {
+        foreach ($p in $browserMap[$browser]) {
+            $bytes = Get-FolderSizeBytes $p 0
+            $total += $bytes
+            [void]$rows.Add([pscustomobject]@{
+                Label = "Browser/$browser"
+                Path  = $p
+                Bytes = $bytes
+                Size  = if ($bytes -ge 1MB) { "{0:N1} MB" -f ($bytes / 1MB) } else { "{0:N0} KB" -f ($bytes / 1KB) }
+            })
+        }
     }
 
     if ($Shaders) {
@@ -249,6 +319,20 @@ function Get-CleanupPreview {
         }
     }
 
+    if ($WuCache) {
+        $wuPath = "C:\Windows\SoftwareDistribution\Download"
+        if (Test-PathSafe $wuPath) {
+            $bytes = Get-FolderSizeBytes $wuPath 0
+            $total += $bytes
+            [void]$rows.Add([pscustomobject]@{
+                Label = "WU Download Cache"
+                Path  = $wuPath
+                Bytes = $bytes
+                Size  = if ($bytes -ge 1MB) { "{0:N1} MB" -f ($bytes / 1MB) } else { "{0:N0} KB" -f ($bytes / 1KB) }
+            })
+        }
+    }
+
     return [pscustomobject]@{
         Rows       = @($rows)
         TotalBytes = $total
@@ -305,7 +389,7 @@ function Show-CleanupPreviewDialog {
     $form.Controls.AddRange(@($btnOk, $btnCancel))
     $form.AcceptButton = $btnOk
     $form.CancelButton = $btnCancel
-    return $form.ShowDialog()
+    return Invoke-WithUiModal { $form.ShowDialog() }
 }
 
 function Get-RunSummaryObject {
@@ -343,17 +427,24 @@ function Show-RunSummaryDialog {
             "Results: $($Summary.OkCount) OK | $($Summary.WarnCount) warn | $($Summary.FailCount) fail"
             "Restart pending: $reboot"
         ) -join "`n"
-        [System.Windows.Forms.MessageBox]::Show(
-            $body,
-            $Title,
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            $(if ($Summary.FailCount -gt 0) {
+        [void](Show-UiMessageBox `
+            -Text $body `
+            -Caption $Title `
+            -Buttons ([System.Windows.Forms.MessageBoxButtons]::OK) `
+            -Icon $(if ($Summary.FailCount -gt 0) {
                 [System.Windows.Forms.MessageBoxIcon]::Warning
             } else {
                 [System.Windows.Forms.MessageBoxIcon]::Information
-            })
-        ) | Out-Null
+            }))
     } catch { }
+}
+
+function Get-ExpectedSha256Text {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $line = (($Text -split "`r?`n") | Where-Object { $_ -and ($_ -notmatch '^\s*#') } | Select-Object -First 1)
+    if ($line -match '([A-Fa-f0-9]{64})') { return $Matches[1].ToLowerInvariant() }
+    return $null
 }
 
 function Get-GitHubLatestRelease {
@@ -370,15 +461,25 @@ function Get-GitHubLatestRelease {
             $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
             $json = $reader.ReadToEnd() | ConvertFrom-Json
             $zipAsset = @($json.assets) |
-                Where-Object { $_.name -and ($_.name -match '\.zip$') -and $_.browser_download_url } |
+                Where-Object { $_.name -and ($_.name -match '\.zip$') -and ($_.name -notmatch '\.sha256') -and $_.browser_download_url } |
                 Select-Object -First 1
+            $sumAsset = @($json.assets) |
+                Where-Object { $_.name -and ($_.name -match '\.sha256$') -and $_.browser_download_url } |
+                Select-Object -First 1
+            $digest = $null
+            if ($zipAsset -and $zipAsset.digest) {
+                $digest = Get-ExpectedSha256Text ([string]$zipAsset.digest)
+            }
             return [pscustomobject]@{
-                Tag     = [string]$json.tag_name
-                Name    = [string]$json.name
-                Url     = [string]$json.html_url
-                Latest  = ([string]$json.tag_name).TrimStart('v', 'V')
-                ZipUrl  = if ($zipAsset) { [string]$zipAsset.browser_download_url } else { $null }
-                ZipName = if ($zipAsset) { [string]$zipAsset.name } else { $null }
+                Tag            = [string]$json.tag_name
+                Name           = [string]$json.name
+                Url            = [string]$json.html_url
+                Latest         = ([string]$json.tag_name).TrimStart('v', 'V')
+                ZipUrl         = if ($zipAsset) { [string]$zipAsset.browser_download_url } else { $null }
+                ZipName        = if ($zipAsset) { [string]$zipAsset.name } else { $null }
+                Sha256Url      = if ($sumAsset) { [string]$sumAsset.browser_download_url } else { $null }
+                DigestSha256   = $digest
+                ExpectedSha256 = $digest
             }
         } finally {
             $resp.Close()
@@ -388,15 +489,23 @@ function Get-GitHubLatestRelease {
     }
 }
 
+function ConvertTo-ComparableVersion {
+    # Keep only the leading numeric core: "v5.3.0-rc1" -> 5.3.0, not 5.3.0.1
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $m = [regex]::Match([string]$Text, '(\d+(?:\.\d+){0,3})')
+    if (-not $m.Success) { return $null }
+    $core = $m.Groups[1].Value.Trim('.')
+    if (-not $core) { return $null }
+    try { return [version]$core } catch { return $null }
+}
+
 function Compare-AppVersion {
     param([string]$Current, [string]$Other)
-    try {
-        $c = [version]($Current -replace '[^\d\.]', '')
-        $o = [version]($Other -replace '[^\d\.]', '')
-        return $c.CompareTo($o)
-    } catch {
-        return 0
-    }
+    $c = ConvertTo-ComparableVersion $Current
+    $o = ConvertTo-ComparableVersion $Other
+    if ($null -eq $c -or $null -eq $o) { return 0 }
+    return $c.CompareTo($o)
 }
 
 function Test-AppUpdateAvailable {
@@ -415,6 +524,15 @@ function Test-AppUpdateAvailable {
     if ($cmp -lt 0) {
         return [pscustomobject]@{
             Status  = 'UpdateAvailable'
+            Release = $rel
+        }
+    }
+    if ($cmp -gt 0) {
+        if (-not $Silent) {
+            Write-Info ("Local build is newer than GitHub (v{0} > {1})" -f $Script:AppVersion, $rel.Tag)
+        }
+        return [pscustomobject]@{
+            Status  = 'NewerThanRelease'
             Release = $rel
         }
     }
@@ -470,6 +588,47 @@ function Invoke-AppSelfUpdate {
     }
     Write-Ok ("Downloaded {0}" -f $zipName)
 
+    # Prefer published .sha256 file (same order as Get.ps1), then GitHub asset digest
+    $expected = $null
+    if ($Release.Sha256Url) {
+        Write-Info "Fetching release checksum..."
+        Set-UiStatusText "Verifying checksum..."
+        Pump-Ui
+        $sumPath = Join-Path $work 'expected.sha256'
+        $sumDl = Invoke-WithUiWait -Activity "Downloading checksum" -TimeoutSec 60 -ArgumentList @($Release.Sha256Url, $sumPath) -ScriptBlock {
+            param([string]$Url, [string]$OutFile)
+            try {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                $wc = New-Object System.Net.WebClient
+                $wc.Headers.Add("User-Agent", "PC-Maintenance-Kit")
+                $wc.DownloadFile($Url, $OutFile)
+                if (Test-Path -LiteralPath $OutFile) { "OK" } else { "ERR:missing checksum file" }
+            } catch {
+                "ERR:" + $_.Exception.Message
+            }
+        }
+        $sumText = Get-AsyncResultText $sumDl
+        if ($sumText -eq "OK") {
+            $expected = Get-ExpectedSha256Text (Get-Content -LiteralPath $sumPath -Raw -EA SilentlyContinue)
+        } else {
+            Write-Warn "Could not download checksum file; trying release digest"
+        }
+    }
+    if (-not $expected) {
+        if ($Release.DigestSha256) { $expected = $Release.DigestSha256 }
+        elseif ($Release.ExpectedSha256) { $expected = $Release.ExpectedSha256 }
+    }
+
+    if (-not $expected) {
+        throw "Refusing to install update: no SHA256 checksum was published for this release."
+    }
+
+    $actual = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) {
+        throw ("SHA256 mismatch.`n  expected: {0}`n  actual:   {1}" -f $expected, $actual)
+    }
+    Write-Ok ("SHA256 OK  {0}" -f $actual)
+
     Write-Info "Extracting update..."
     Set-UiStatusText "Extracting update..."
     Pump-Ui
@@ -482,8 +641,19 @@ function Invoke-AppSelfUpdate {
     }
     $payloadRoot = Split-Path -Parent $payloadPs1.FullName
 
+    # Reject silently-tampered signed scripts if any are Authenticode-signed
+    Get-ChildItem -LiteralPath $payloadRoot -Recurse -Filter *.ps1 -File -EA SilentlyContinue | ForEach-Object {
+        $sig = Get-AuthenticodeSignature -FilePath $_.FullName
+        if ($sig.Status -eq 'HashMismatch') {
+            throw ("Rejected {0}: file was signed but has been modified" -f $_.Name)
+        }
+    }
+
     $applyPs1 = Join-Path $work "Apply-Update.ps1"
     $startBat = Join-Path $Script:AppRoot "Start.bat"
+    # Snapshot lives beside the install (never inside it, or robocopy would recurse into itself)
+    $backupRoot = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { $env:TEMP }
+    $backupDir = Join-Path $backupRoot 'PC-Maintenance-Kit-backup'
     $applyBody = @"
 #Requires -Version 5.1
 `$ErrorActionPreference = 'Continue'
@@ -500,6 +670,50 @@ $startBat
 `$work = @'
 $work
 '@
+`$backup = @'
+$backupDir
+'@
+
+function Start-InstalledApp {
+    param([string]`$Root, [string]`$Bat)
+    if (Test-Path -LiteralPath `$Bat) {
+        Start-Process -FilePath `$Bat -WorkingDirectory `$Root
+        return
+    }
+    `$ps1 = Join-Path `$Root 'PC-Maintenance.ps1'
+    `$ps = Join-Path `$env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    Start-Process -FilePath `$ps -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-WindowStyle','Hidden','-File',`$ps1,'-Mode','Gui') -WorkingDirectory `$Root
+}
+
+function Test-InstallHealthy {
+    # A half-copied or corrupted install will not parse - cheap, offline health gate
+    param([string]`$Root)
+    try {
+        `$entry = Join-Path `$Root 'PC-Maintenance.ps1'
+        if (-not (Test-Path -LiteralPath `$entry)) { return `$false }
+        `$files = New-Object System.Collections.Generic.List[string]
+        [void]`$files.Add(`$entry)
+        `$libDir = Join-Path `$Root 'lib'
+        if (Test-Path -LiteralPath `$libDir) {
+            Get-ChildItem -LiteralPath `$libDir -Filter *.ps1 -File -EA SilentlyContinue | ForEach-Object {
+                [void]`$files.Add(`$_.FullName)
+            }
+        }
+        if (`$files.Count -lt 2) { return `$false }
+        foreach (`$f in `$files) {
+            `$errs = `$null
+            `$toks = `$null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(`$f, [ref]`$toks, [ref]`$errs)
+            if (`$errs -and `$errs.Count -gt 0) { return `$false }
+        }
+        return `$true
+    } catch {
+        return `$false
+    }
+}
+
+`$rc = Join-Path `$env:SystemRoot 'System32\robocopy.exe'
+`$errDir = Join-Path `$env:TEMP 'PC-Maintenance-Kit'
 
 try {
     `$deadline = (Get-Date).AddSeconds(90)
@@ -515,23 +729,58 @@ try {
     if (-not (Test-Path -LiteralPath `$source)) { throw "Update source missing" }
     if (-not (Test-Path -LiteralPath `$target)) { throw "App folder missing" }
 
+    # Snapshot the working install first so a bad release can always be undone
+    if (Test-Path -LiteralPath `$backup) {
+        Remove-Item -LiteralPath `$backup -Recurse -Force -EA SilentlyContinue
+    }
+    New-Item -ItemType Directory -Path `$backup -Force | Out-Null
+    & `$rc `$target `$backup /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+    if (`$LASTEXITCODE -ge 8) { throw "Could not back up current install (robocopy `$LASTEXITCODE)" }
+
     # robocopy avoids Copy-Item nesting bug (lib -> lib\lib when destination exists)
-    `$rc = Join-Path `$env:SystemRoot 'System32\robocopy.exe'
     & `$rc `$source `$target /E /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
     `$code = `$LASTEXITCODE
     if (`$code -ge 8) { throw "robocopy failed with code `$code" }
 
-    if (Test-Path -LiteralPath `$startBat) {
-        Start-Process -FilePath `$startBat -WorkingDirectory `$target
-    } else {
-        `$ps1 = Join-Path `$target 'PC-Maintenance.ps1'
-        `$ps = Join-Path `$env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        Start-Process -FilePath `$ps -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-WindowStyle','Hidden','-File',`$ps1,'-Mode','Gui') -WorkingDirectory `$target
+    # Purge scripts removed from the new release (robocopy /E does not delete extras)
+    function Remove-StaleScripts {
+        param([string]`$SrcRoot, [string]`$DstRoot)
+        if (-not (Test-Path -LiteralPath `$SrcRoot)) { return }
+        if (-not (Test-Path -LiteralPath `$DstRoot)) { return }
+        Get-ChildItem -LiteralPath `$DstRoot -File -Filter '*.ps1' -EA SilentlyContinue | ForEach-Object {
+            `$peer = Join-Path `$SrcRoot `$_.Name
+            if (-not (Test-Path -LiteralPath `$peer)) {
+                Remove-Item -LiteralPath `$_.FullName -Force -EA SilentlyContinue
+            }
+        }
     }
+    Remove-StaleScripts -SrcRoot `$source -DstRoot `$target
+    Remove-StaleScripts -SrcRoot (Join-Path `$source 'lib') -DstRoot (Join-Path `$target 'lib')
+
+    if (-not (Test-InstallHealthy -Root `$target)) {
+        throw "Updated install failed its health check"
+    }
+
+    Start-InstalledApp -Root `$target -Bat `$startBat
 } catch {
-    `$errDir = Join-Path `$env:TEMP 'PC-Maintenance-Kit'
     if (-not (Test-Path `$errDir)) { New-Item -ItemType Directory -Path `$errDir -Force | Out-Null }
-    `$_ | Out-File (Join-Path `$errDir 'update-error.log') -Encoding utf8
+    `$log = Join-Path `$errDir 'update-error.log'
+    `$_ | Out-File `$log -Encoding utf8
+
+    # Roll back so the user is never left with a broken install
+    if (Test-Path -LiteralPath (Join-Path `$backup 'PC-Maintenance.ps1')) {
+        try {
+            & `$rc `$backup `$target /E /IS /IT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+            if (`$LASTEXITCODE -lt 8 -and (Test-InstallHealthy -Root `$target)) {
+                "Rolled back to the previous version." | Out-File `$log -Encoding utf8 -Append
+            } else {
+                "Rollback failed. Backup kept at: `$backup" | Out-File `$log -Encoding utf8 -Append
+            }
+        } catch {
+            "Rollback threw: `$(`$_.Exception.Message)" | Out-File `$log -Encoding utf8 -Append
+        }
+    }
+    try { Start-InstalledApp -Root `$target -Bat `$startBat } catch { }
 } finally {
     Start-Sleep -Seconds 2
     try { Remove-Item -LiteralPath `$work -Recurse -Force -EA SilentlyContinue } catch { }
@@ -539,6 +788,7 @@ try {
 "@
     Set-Content -LiteralPath $applyPs1 -Value $applyBody -Encoding UTF8
 
+    Write-Info ("Backing up current install to {0}" -f $backupDir)
     Write-Info "Installing update and restarting..."
     Set-UiStatusText "Installing update and restarting..."
     Pump-Ui
@@ -567,12 +817,11 @@ function Show-UpdateAvailableDialog {
         } else {
             "A newer release is available.`n`nThis PC: v{0}`nLatest: {1}`n`nNo ZIP is attached to this release, so one-click update is unavailable.`nOpen GitHub releases page?" -f $Script:AppVersion, $Release.Tag
         }
-        $r = [System.Windows.Forms.MessageBox]::Show(
-            $msg,
-            "PC Maintenance Kit - Update",
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            [System.Windows.Forms.MessageBoxIcon]::Information
-        )
+        $r = Show-UiMessageBox `
+            -Text $msg `
+            -Caption "PC Maintenance Kit - Update" `
+            -Buttons ([System.Windows.Forms.MessageBoxButtons]::YesNo) `
+            -Icon ([System.Windows.Forms.MessageBoxIcon]::Information)
         if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
 
         if ($hasZip) {
@@ -581,12 +830,11 @@ function Show-UpdateAvailableDialog {
             } catch {
                 $Script:ExitAfterUpdate = $false
                 Write-Fail $_.Exception.Message
-                $fallback = [System.Windows.Forms.MessageBox]::Show(
-                    ("Automatic update failed:`n{0}`n`nOpen GitHub releases page instead?" -f $_.Exception.Message),
-                    "PC Maintenance Kit - Update",
-                    [System.Windows.Forms.MessageBoxButtons]::YesNo,
-                    [System.Windows.Forms.MessageBoxIcon]::Warning
-                )
+                $fallback = Show-UiMessageBox `
+                    -Text ("Automatic update failed:`n{0}`n`nOpen GitHub releases page instead?" -f $_.Exception.Message) `
+                    -Caption "PC Maintenance Kit - Update" `
+                    -Buttons ([System.Windows.Forms.MessageBoxButtons]::YesNo) `
+                    -Icon ([System.Windows.Forms.MessageBoxIcon]::Warning)
                 if ($fallback -eq [System.Windows.Forms.DialogResult]::Yes -and $Release.Url) {
                     Start-Process $Release.Url
                 }
@@ -601,10 +849,10 @@ function Start-ElevatedCli {
     $scriptPath = Join-Path $Script:AppRoot "PC-Maintenance.ps1"
     if (-not (Test-PathSafe $scriptPath)) { throw "PC-Maintenance.ps1 not found" }
     $ps = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-    $args = "-NoProfile -ExecutionPolicy Bypass -NoExit -File `"$scriptPath`" -Mode Cli"
+    $cliArgs = "-NoProfile -ExecutionPolicy Bypass -NoExit -File `"$scriptPath`" -Mode Cli"
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $ps
-    $psi.Arguments = $args
+    $psi.Arguments = $cliArgs
     $psi.WorkingDirectory = $Script:AppRoot
     $psi.UseShellExecute = $true
     # Already elevated GUI -> child inherits admin; Verb runas still works if needed

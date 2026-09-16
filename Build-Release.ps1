@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 param(
-    [string]$Version = "5.1.6",
+    [string]$Version = "",
     [string]$CertThumbprint = $env:PCMK_SIGN_THUMBPRINT,
     [string]$PfxPath = "",
     [string]$PfxPassword = $env:PCMK_SIGN_PFX_PASSWORD
@@ -8,6 +8,21 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+# VERSION is the only source of truth. An explicit -Version must agree with it,
+# otherwise the ZIP name and the VERSION inside it silently disagree.
+$versionFile = Join-Path $Root "VERSION"
+if (-not (Test-Path -LiteralPath $versionFile)) {
+    throw "VERSION file not found at $versionFile"
+}
+$fileVersion = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+if (-not $fileVersion) { throw "VERSION file is empty" }
+if (-not $Version) {
+    $Version = $fileVersion
+} elseif ($Version -ne $fileVersion) {
+    throw "-Version '$Version' does not match VERSION file '$fileVersion'. Bump VERSION first."
+}
+
 $Dist = Join-Path $Root "dist"
 $Stage = Join-Path $Dist ("PC-Maintenance-Kit-v" + $Version)
 $Zip = Join-Path $Dist ("PC-Maintenance-Kit-v" + $Version + ".zip")
@@ -22,19 +37,19 @@ function Get-SigningCertificate {
         $pwdText = $PfxPassword
         if (-not $pwdText) { $pwdText = $env:PCMK_SIGN_PFX_PASSWORD }
         if (-not $pwdText) { throw "PCMK_SIGN_PFX_BASE64 is set but no PFX password was provided." }
-        $pwd = ConvertTo-SecureString $pwdText -AsPlainText -Force
+        $securePwd = ConvertTo-SecureString $pwdText -AsPlainText -Force
         return New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(
             $tempPfx,
-            $pwd,
+            $securePwd,
             [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
         )
     }
     if ($PfxPath -and (Test-Path -LiteralPath $PfxPath)) {
         if (-not $PfxPassword) { throw "PfxPath requires -PfxPassword or PCMK_SIGN_PFX_PASSWORD." }
-        $pwd = ConvertTo-SecureString $PfxPassword -AsPlainText -Force
+        $securePwd = ConvertTo-SecureString $PfxPassword -AsPlainText -Force
         return New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(
             $PfxPath,
-            $pwd,
+            $securePwd,
             [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
         )
     }
@@ -69,11 +84,25 @@ try {
     if (Test-Path $ShaFile) { Remove-Item $ShaFile -Force }
     New-Item -ItemType Directory -Path (Join-Path $Stage "lib") -Force | Out-Null
 
-    Copy-Item (Join-Path $Root "Start.bat") $Stage
-    Copy-Item (Join-Path $Root "PC-Maintenance.ps1") $Stage
-    Copy-Item (Join-Path $Root "README.md") $Stage
-    Copy-Item (Join-Path $Root "LICENSE") $Stage
+    # Required payload - a missing file here must fail the build, not ship silently
+    foreach ($name in @("Start.bat", "PC-Maintenance.ps1", "Get.ps1", "README.md", "LICENSE", "VERSION")) {
+        $src = Join-Path $Root $name
+        if (-not (Test-Path -LiteralPath $src)) { throw "Release payload missing: $name" }
+        Copy-Item $src $Stage
+    }
+    if (Test-Path -LiteralPath (Join-Path $Root "CHANGELOG.md")) {
+        Copy-Item (Join-Path $Root "CHANGELOG.md") $Stage
+    }
     Copy-Item (Join-Path $Root "lib\*.ps1") (Join-Path $Stage "lib")
+
+    # README links docs/screenshots/*.png - ship them or every release has broken images
+    $docsSrc = Join-Path $Root "docs"
+    if (Test-Path -LiteralPath $docsSrc) {
+        Copy-Item $docsSrc $Stage -Recurse -Force
+    }
+
+    $stagedLibs = @(Get-ChildItem -LiteralPath (Join-Path $Stage "lib") -Filter *.ps1 -File)
+    if ($stagedLibs.Count -lt 1) { throw "No lib scripts were staged" }
 
     $cert = Get-SigningCertificate
     if ($cert) {

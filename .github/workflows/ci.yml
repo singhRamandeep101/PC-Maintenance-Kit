@@ -3,14 +3,53 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Version sanity
+        shell: powershell
+        run: |
+          if (-not (Test-Path -LiteralPath .\VERSION)) { throw "VERSION file is required." }
+          $ver = (Get-Content -LiteralPath .\VERSION -Raw).Trim()
+          if ($ver -notmatch '^\d+(\.\d+){1,3}$') { throw "VERSION is invalid: $ver" }
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $tag = $env:GITHUB_REF -replace '^refs/tags/v', ''
+            if ($tag -ne $ver) { throw "Tag v$tag does not match VERSION $ver" }
+          }
+          Write-Host "VERSION=$ver"
+
+      - name: Static analysis
+        shell: powershell
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -SkipPublisherCheck -ErrorAction Stop
+          Import-Module PSScriptAnalyzer -ErrorAction Stop
+          $results = Invoke-ScriptAnalyzer -Path . -Recurse -ExcludeRule PSAvoidUsingWriteHost,PSUseApprovedVerbs,PSAvoidUsingPlainTextForPassword,PSAvoidUsingConvertToSecureStringWithPlainText
+          $errors = @($results | Where-Object { $_.Severity -eq 'Error' })
+          $warnings = @($results | Where-Object { $_.Severity -eq 'Warning' })
+          if ($warnings.Count -gt 0) {
+            Write-Host ("::warning::PSScriptAnalyzer reported {0} warning(s)" -f $warnings.Count)
+            $warnings | Format-Table RuleName, ScriptName, Line, Message -AutoSize | Out-String | Write-Host
+          }
+          if ($errors.Count -gt 0) {
+            $errors | Format-Table RuleName, ScriptName, Line, Message -AutoSize | Out-String | Write-Host
+            throw ("PSScriptAnalyzer found {0} error(s)" -f $errors.Count)
+          }
+          Write-Host "Static analysis clean (no errors)"
 
       - name: Run tests
         shell: powershell
@@ -24,10 +63,8 @@ jobs:
         shell: powershell
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-Release.ps1
-          $zip = Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'dist') -Filter 'PC-Maintenance-Kit-v*.zip' |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
-          if (-not $zip) { throw "ZIP was not created in dist\" }
+          $ver = (Get-Content -LiteralPath .\VERSION -Raw).Trim()
+          $zip = Get-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "dist\PC-Maintenance-Kit-v$ver.zip")
           $sha = $zip.FullName + '.sha256'
           if (-not (Test-Path -LiteralPath $sha)) { throw "Checksum file was not created: $sha" }
           $raw = Get-Content -LiteralPath $sha -Raw
@@ -37,4 +74,72 @@ jobs:
           if ($actual -ne $expected) {
             throw "SHA256 mismatch. expected=$expected actual=$actual"
           }
+          # Staged payload must include VERSION matching AppVersion
+          $stage = Join-Path $env:GITHUB_WORKSPACE "dist\PC-Maintenance-Kit-v$ver"
+          $stageVer = (Get-Content -LiteralPath (Join-Path $stage 'VERSION') -Raw).Trim()
+          if ($stageVer -ne $ver) { throw "Staged VERSION mismatch" }
+          foreach ($required in @('Get.ps1','Start.bat','PC-Maintenance.ps1','README.md','LICENSE')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $stage $required))) {
+              throw "Staged payload is missing $required"
+            }
+          }
+          # If signing secrets were supplied, the payload must actually be signed
+          if ($env:PCMK_SIGN_PFX_BASE64) {
+            $entry = Join-Path $stage 'PC-Maintenance.ps1'
+            $sig = Get-AuthenticodeSignature -FilePath $entry
+            if ($sig.Status -ne 'Valid') {
+              throw "Signing secrets were present but $entry is $($sig.Status)"
+            }
+            Write-Host "Authenticode verified"
+          }
           Write-Host ("SHA256 OK {0}  {1}" -f $actual, $zip.Name)
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pc-maintenance-kit-zip
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: pc-maintenance-kit-zip
+          path: dist
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: powershell
+        run: |
+          $ver = (Get-Content -LiteralPath .\VERSION -Raw).Trim()
+          $zip = "dist\PC-Maintenance-Kit-v$ver.zip"
+          $sha = "$zip.sha256"
+          if (-not (Test-Path -LiteralPath $zip)) { throw "Missing $zip" }
+          if (-not (Test-Path -LiteralPath $sha)) { throw "Missing $sha" }
+          $digest = (Get-Content -LiteralPath $sha -Raw).Trim()
+          $notes = @(
+            "Built from ``$env:GITHUB_SHA`` by CI.",
+            "",
+            "SHA256:",
+            '```',
+            $digest,
+            '```'
+          ) -join "`n"
+          $notesFile = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          Set-Content -LiteralPath $notesFile -Value $notes -Encoding UTF8
+          gh release create "v$ver" $zip $sha --title "PC Maintenance Kit v$ver" --notes-file $notesFile

@@ -1,3 +1,4 @@
+#Requires -Version 5.1
 function Get-GameModeEnabled {
     $v = (Get-ItemProperty "HKCU:\Software\Microsoft\GameBar" -Name AutoGameModeEnabled -EA SilentlyContinue).AutoGameModeEnabled
     if ($null -eq $v) { return $null }
@@ -85,16 +86,41 @@ function Set-DiscordHardwareAcceleration([bool]$Enabled) {
     if (-not (Test-Path $p)) { throw "Discord settings.json not found. Is Discord installed?" }
 
     $raw = [System.IO.File]::ReadAllText($p)
-    $valueText = if ($Enabled) { "true" } else { "false" }
-    $pattern = '"hardwareAcceleration"\s*:\s*(true|false)'
-    if ($raw -match $pattern) {
+    try {
+        $null = $raw | ConvertFrom-Json
+    } catch {
+        throw "Discord settings.json is invalid JSON and was left unchanged."
+    }
+
+    $valueText = if ($Enabled) { 'true' } else { 'false' }
+    # Match any existing value (bool/null/number/string) so we never insert a duplicate key
+    $pattern = '"hardwareAcceleration"\s*:\s*[^,}\r\n]+'
+    if ($raw -match '"hardwareAcceleration"\s*:') {
         $updated = [regex]::Replace($raw, $pattern, ('"hardwareAcceleration": ' + $valueText), 1)
-    } else {
-        # Insert after opening brace without rewriting the whole JSON tree
-        $updated = [regex]::Replace($raw, '^\s*\{', ('{' + "`n  `"hardwareAcceleration`": $valueText,"), 1)
-        if ($updated -eq $raw) {
-            throw "Could not update Discord settings.json"
+    } elseif ($raw -match '^\s*\{\s*\}\s*$') {
+        $updated = "{`r`n  `"hardwareAcceleration`": $valueText`r`n}"
+    } elseif ($raw -match '^(\s*\{)(\s*)') {
+        $prefix = $Matches[1] + $Matches[2] + '"hardwareAcceleration": ' + $valueText + ',' + $Matches[2]
+        $updated = $prefix + $raw.Substring($Matches[0].Length)
+        try {
+            $null = $updated | ConvertFrom-Json
+        } catch {
+            $j = $raw | ConvertFrom-Json
+            if ($null -eq $j) {
+                $j = [pscustomobject]@{ hardwareAcceleration = [bool]$Enabled }
+            } else {
+                $j | Add-Member -NotePropertyName hardwareAcceleration -NotePropertyValue ([bool]$Enabled) -Force
+            }
+            $updated = $j | ConvertTo-Json -Depth 30
         }
+    } else {
+        throw "Could not update Discord settings.json"
+    }
+
+    try {
+        $null = $updated | ConvertFrom-Json
+    } catch {
+        throw "Refusing to write invalid Discord settings.json"
     }
 
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
