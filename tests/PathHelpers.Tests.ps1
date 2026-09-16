@@ -460,6 +460,7 @@ $pagesRaw = Get-Content -LiteralPath (Join-Path $Root 'lib\GuiPages.ps1') -Raw
 Assert-True ($pagesRaw -match 'function Add-GuiHomePage') 'GuiPages has Home builder'
 Assert-True ($pagesRaw -match 'function Add-GuiGamingPage') 'GuiPages has Gaming builder'
 Assert-True ($pagesRaw -match 'ChkScheduleWeekly') 'Home page has schedule checkbox'
+Assert-True ($pagesRaw -match 'GetNewClosure') 'GuiPages Resize handlers capture locals with GetNewClosure'
 
 $buildRaw = Get-Content -LiteralPath (Join-Path $Root 'Build-Release.ps1') -Raw
 Assert-True ($buildRaw -match 'Get-FileHash') 'Build-Release.ps1 hashes ZIP'

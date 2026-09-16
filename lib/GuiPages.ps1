@@ -84,7 +84,7 @@ function Add-GuiHomePage {
             $w = [math]::Max(200, $sender.ClientSize.Width - 40)
             $homeLimiterVal.Width = $w
             $homeFixesVal.Width = $w
-        })
+        }.GetNewClosure())
 
         # Dock Top metrics: add in reverse visual order (bottom first)
         $ramCard = New-MetricCard "EDA2" "RAM"
@@ -164,7 +164,7 @@ function Add-GuiHomePage {
             $btnRefreshHome.Width = 110
             $nextLbl.Top = $sender.ClientSize.Height - 36
             $nextLbl.Width = $wFull
-        })
+        }.GetNewClosure())
 
 
     return [ordered]@{
@@ -250,7 +250,7 @@ function Add-GuiCleanupPage {
             $btnCleanup.Top = $top
             $btnPreview.Top = $top
             $cleanHint.Width = $sender.ClientSize.Width - 40
-        })
+        }.GetNewClosure())
 
 
     return [ordered]@{
@@ -301,7 +301,7 @@ function Add-GuiUpdatesPage {
             $btnAmd.Top = $y
             $btnNv.Top = $y
             $updHint.Width = $sender.ClientSize.Width - 40
-        })
+        }.GetNewClosure())
 
 
     return [ordered]@{
@@ -410,7 +410,7 @@ function Add-GuiGamingPage {
             $optFixesVal.Width = $w
             $rowsHost.Width = $sender.ClientSize.Width - 16
             $rowsHost.Height = [math]::Max(120, $sender.ClientSize.Height - 204)
-        })
+        }.GetNewClosure())
 
         $gameRight = New-Object System.Windows.Forms.Panel
         $gameRight.Dock = "Fill"
@@ -444,7 +444,7 @@ function Add-GuiGamingPage {
             }
             $gameTip.Width = $w
             $gameTip.Top = $sender.ClientSize.Height - 60
-        })
+        }.GetNewClosure())
 
 
     return [ordered]@{
@@ -564,7 +564,7 @@ function Add-GuiDevicePage {
             }
             $devTip.Width = $w
             $devTip.Top = $sender.ClientSize.Height - 48
-        })
+        }.GetNewClosure())
 
 
 
