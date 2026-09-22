@@ -86,12 +86,16 @@ function Get-WeeklyCareTask {
 }
 
 function Test-WeeklyCareScheduled {
-    $t = Get-WeeklyCareTask
+    param($Task = $null)
+    $t = $Task
+    if (-not $t) { $t = Get-WeeklyCareTask }
     return [bool]($t -and $t.State -ne 'Disabled')
 }
 
 function Get-WeeklyCareScheduleStatusText {
-    $t = Get-WeeklyCareTask
+    param($Task = $null)
+    $t = $Task
+    if (-not $t) { $t = Get-WeeklyCareTask }
     if (-not $t) { return "Weekly schedule: off" }
     if ($t.State -eq 'Disabled') { return "Weekly schedule: disabled" }
     try {
@@ -160,12 +164,14 @@ function Update-GuiCareScheduleStatus {
     if (-not $Script:GuiControls) { return }
     $lbl = $Script:GuiControls.LblScheduleStatus
     $chk = $Script:GuiControls.ChkScheduleWeekly
+    $task = $null
+    try { $task = Get-WeeklyCareTask } catch { }
     if ($lbl) {
-        try { $lbl.Text = Get-WeeklyCareScheduleStatusText } catch { $lbl.Text = "Weekly schedule: ?" }
+        try { $lbl.Text = Get-WeeklyCareScheduleStatusText -Task $task } catch { $lbl.Text = "Weekly schedule: ?" }
     }
     if ($chk) {
         try {
-            $on = Test-WeeklyCareScheduled
+            $on = Test-WeeklyCareScheduled -Task $task
             if ($chk.Checked -ne $on) { $chk.Checked = $on }
         } catch { }
     }

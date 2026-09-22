@@ -49,15 +49,19 @@ function Open-StorageSettings {
 
 function Get-DeviceSummary {
     param([switch]$Refresh)
-    if (-not $Refresh -and $Script:DeviceSummaryCache -and (([datetime]::UtcNow - $Script:DeviceSummaryCacheUtc).TotalSeconds -lt 12)) {
+    if (-not $Refresh -and $Script:DeviceSummaryCache -and (([datetime]::UtcNow - $Script:DeviceSummaryCacheUtc).TotalSeconds -lt 30)) {
         return $Script:DeviceSummaryCache
     }
 
+    if (Get-Command Pump-Ui -EA SilentlyContinue) { Pump-Ui }
+
     $cpu = (Get-CimInstance Win32_Processor -EA SilentlyContinue | Select-Object -First 1).Name
     if (-not $cpu) { $cpu = "Unknown CPU" }
+    if (Get-Command Pump-Ui -EA SilentlyContinue) { Pump-Ui }
 
     $gpus = @(Get-CimInstance Win32_VideoController -EA SilentlyContinue | Where-Object { $_.Name -and $_.Name -notmatch 'Basic|Remote|Microsoft' } | Select-Object -ExpandProperty Name -Unique)
     $gpu = if ($gpus.Count) { $gpus -join " | " } else { "Unknown GPU" }
+    if (Get-Command Pump-Ui -EA SilentlyContinue) { Pump-Ui }
 
     $sticks = @(Get-CimInstance Win32_PhysicalMemory -EA SilentlyContinue)
     $ramGb = [math]::Round((($sticks | Measure-Object Capacity -Sum).Sum) / 1GB, 1)
@@ -73,23 +77,25 @@ function Get-DeviceSummary {
         elseif ($ramSlots -ge 2) { $ramChannels = "Likely dual (verify in Task Manager)" }
     } catch { }
 
+    if (Get-Command Pump-Ui -EA SilentlyContinue) { Pump-Ui }
+
     $diskName = "Unknown"
     $diskHealth = "Unknown"
+    $media = $null
     try {
-        $d = $null
         if (Get-Command Get-SystemDisk -EA SilentlyContinue) {
-            $d = Get-SystemDisk
+            $media = Get-SystemDisk -Refresh:$Refresh
         }
-        if (-not $d) {
+        if (-not $media) {
             $partition = Get-Partition -DriveLetter C -EA SilentlyContinue
             if ($partition) {
-                $d = Get-PhysicalDisk -Number $partition.DiskNumber -EA SilentlyContinue
+                $media = Get-PhysicalDisk -Number $partition.DiskNumber -EA SilentlyContinue
             }
         }
-        if (-not $d) { $d = Get-PhysicalDisk | Select-Object -First 1 }
-        if ($d) {
-            $diskName = $d.FriendlyName
-            $diskHealth = [string]$d.HealthStatus
+        if (-not $media) { $media = Get-PhysicalDisk | Select-Object -First 1 }
+        if ($media) {
+            $diskName = $media.FriendlyName
+            $diskHealth = [string]$media.HealthStatus
         }
     } catch { }
 
@@ -97,10 +103,6 @@ function Get-DeviceSummary {
     try {
         $vol = Get-Volume -DriveLetter C -EA SilentlyContinue
         if ($vol -and $vol.FileSystemType -eq 'NTFS') {
-            $media = $null
-            try {
-                if (Get-Command Get-SystemDisk -EA SilentlyContinue) { $media = Get-SystemDisk }
-            } catch { }
             if ($media -and $media.MediaType -match 'SSD|Unspecified') {
                 $trim = "SSD detected (TRIM supported on modern Windows)"
             } elseif ($media -and $media.MediaType -match 'HDD') {
@@ -111,9 +113,9 @@ function Get-DeviceSummary {
         }
     } catch { }
 
-    $free = Get-CFreeGB
-    $power = Get-ActivePowerPlanName
-    $reboot = Test-RebootPending
+    $free = Get-CFreeGB -Refresh:$Refresh
+    $power = Get-ActivePowerPlanName -Refresh:$Refresh
+    $reboot = Test-RebootPending -Refresh:$Refresh
 
     $summary = [pscustomobject]@{
         Cpu           = $cpu.Trim()
@@ -124,6 +126,7 @@ function Get-DeviceSummary {
         RamChannels   = $ramChannels
         DiskName      = $diskName
         DiskHealth    = $diskHealth
+        DiskMediaType = if ($media) { [string]$media.MediaType } else { $null }
         TrimInfo      = $trim
         FreeGb        = $free
         PowerPlan     = $power

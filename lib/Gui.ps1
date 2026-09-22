@@ -488,10 +488,135 @@ function Set-GuiBusy([bool]$Busy) {
     }
     if (-not $Busy) {
         $Script:LastJobText = "Ready"
-        $Script:DeviceSummaryCache = $null
-        $Script:OptimizationScoreCache = $null
+        $Script:LiveStatusTarget = $null
+        if (Get-Command Set-PageLiveStatus -EA SilentlyContinue) {
+            try { Set-PageLiveStatus -Idle } catch { }
+        }
     }
     Update-GuiStatusBar
+}
+
+function Set-PageLiveStatus {
+    param(
+        [string]$Text = "",
+        [switch]$Idle
+    )
+    if (-not $Script:GuiControls) { return }
+    $map = [ordered]@{
+        Cleanup = @{ Ctrl = 'LblCleanupLive'; Idle = 'Ready - preview sizes or run cleanup.' }
+        Updates = @{ Ctrl = 'LblUpdatesLive'; Idle = 'Ready - Windows Update and winget when you need them.' }
+        Repair  = @{ Ctrl = 'LblRepairLive'; Idle = 'Ready - only run when Windows feels broken.' }
+    }
+    $target = $Script:LiveStatusTarget
+    foreach ($page in @($map.Keys)) {
+        $info = $map[$page]
+        $lbl = $Script:GuiControls.($info.Ctrl)
+        if (-not $lbl) { continue }
+        if ($Idle) {
+            $lbl.Text = $info.Idle
+            continue
+        }
+        if ($target -and $page -eq $target) {
+            $lbl.Text = $Text
+        }
+    }
+}
+
+function Resolve-LiveStatusTarget([string]$Title) {
+    if ([string]::IsNullOrWhiteSpace($Title)) { return $null }
+    switch -Regex ($Title) {
+        '(?i)cleanup|preview' { return 'Cleanup' }
+        '(?i)^updates$|windows update|winget' { return 'Updates' }
+        '(?i)repair|dism|sfc|restore point' { return 'Repair' }
+        default { return $null }
+    }
+}
+
+function Resolve-GuiRefreshMode([string]$Title) {
+    if ([string]::IsNullOrWhiteSpace($Title)) { return 'Light' }
+    switch -Regex ($Title) {
+        '(?i)^(AMD|NVIDIA)$|Checking for updates|Update check|Device report|Optimization score|Fix my PC|Gaming optimize|Recommended fixes' { return 'None' }
+        '(?i)cleanup|preview|weekly|repair|^updates$|restore|power|discord' { return 'Hardware' }
+        default { return 'Light' }
+    }
+}
+
+function Invoke-GuiPanelsRefresh {
+    param(
+        [ValidateSet('None','Light','Hardware')]$Mode = 'Light',
+        [string]$DoneText = ""
+    )
+    if ($Mode -eq 'None') {
+        if ($DoneText) {
+            Set-UiStatusText $DoneText
+            Update-GuiStatusBar -JobText $DoneText
+        }
+        return
+    }
+    if ($Mode -eq 'Hardware') {
+        if (Get-Command Clear-HardwareProbeCaches -EA SilentlyContinue) {
+            Clear-HardwareProbeCaches
+        } else {
+            $Script:DeviceSummaryCache = $null
+            $Script:OptimizationScoreCache = $null
+        }
+        # Score refresh pulls a fresh device summary once; then bind all panels from cache.
+        try { $null = Get-GamingOptimizationScore -Refresh } catch {
+            try { $null = Get-DeviceSummary -Refresh } catch { }
+        }
+        Pump-Ui
+    }
+    try { Update-GuiHomeSummary } catch { }
+    Pump-Ui
+    try { Update-GuiDevicePanel } catch { }
+    Pump-Ui
+    try { Update-GuiGamingStatus -SkipScore } catch { }
+    if ($DoneText) {
+        Set-UiStatusText $DoneText
+        Update-GuiStatusBar -JobText $DoneText
+    }
+}
+
+function Start-GuiDeferredRefresh {
+    param(
+        [string]$DoneText = "Done",
+        [ValidateSet('None','Light','Hardware')]$Mode = 'Hardware'
+    )
+    # Paint "Done" immediately, then refresh panels on the next UI tick so the
+    # window does not sit frozen after a long job while CIM/score re-scan.
+    if ($Mode -eq 'None') {
+        if ($DoneText) {
+            Set-UiStatusText $DoneText
+            Update-GuiStatusBar -JobText $DoneText
+        }
+        return
+    }
+    $form = Get-UiControl Form
+    if (-not $form -or $form.IsDisposed) {
+        Invoke-GuiPanelsRefresh -Mode $Mode -DoneText $DoneText
+        return
+    }
+    $timer = New-Object System.Windows.Forms.Timer
+    $timer.Interval = 40
+    $timer.Add_Tick({
+        param($sender, $e)
+        try {
+            $sender.Stop()
+            $sender.Dispose()
+        } catch { }
+        try {
+            Set-UiStatusText "Refreshing panels..."
+            Update-GuiStatusBar -JobText "Refreshing panels..."
+            Pump-Ui
+            Invoke-GuiPanelsRefresh -Mode $Mode -DoneText $DoneText
+        } catch {
+            try {
+                Set-UiStatusText $DoneText
+                Update-GuiStatusBar -JobText $DoneText
+            } catch { }
+        }
+    }.GetNewClosure())
+    $timer.Start()
 }
 
 function Confirm-OptionalCleanupCaches {
@@ -515,14 +640,37 @@ function Confirm-OptionalCleanupCaches {
     return ($r -eq [System.Windows.Forms.DialogResult]::Yes)
 }
 
+function Get-GuiCleanupPreviewFingerprint {
+    return ("{0}|{1}|{2}|{3}|{4}|{5}" -f `
+        [int]$Script:GuiControls.DaysNum.Value, `
+        [bool]$Script:GuiControls.ChkCleanShader.Checked, `
+        [bool]$Script:GuiControls.ChkSteam.Checked, `
+        [bool]$Script:GuiControls.ChkEpic.Checked, `
+        [bool]$Script:GuiControls.ChkRiot.Checked, `
+        [bool]$Script:GuiControls.ChkWuCache.Checked)
+}
+
 function Get-GuiCleanupPreview {
-    return Get-CleanupPreview `
+    $fp = Get-GuiCleanupPreviewFingerprint
+    if ($Script:CleanupPreviewCache -and
+        $Script:CleanupPreviewCache.Fingerprint -eq $fp -and
+        (([datetime]::UtcNow - $Script:CleanupPreviewCache.Utc).TotalSeconds -lt 90)) {
+        Write-Info "Reusing recent cleanup preview (same options)"
+        return $Script:CleanupPreviewCache.Preview
+    }
+    $preview = Get-CleanupPreview `
         -TempOlderThanDays ([int]$Script:GuiControls.DaysNum.Value) `
         -Shaders ([bool]$Script:GuiControls.ChkCleanShader.Checked) `
         -Steam ([bool]$Script:GuiControls.ChkSteam.Checked) `
         -Epic ([bool]$Script:GuiControls.ChkEpic.Checked) `
         -Riot ([bool]$Script:GuiControls.ChkRiot.Checked) `
         -WuCache ([bool]$Script:GuiControls.ChkWuCache.Checked)
+    $Script:CleanupPreviewCache = @{
+        Fingerprint = $fp
+        Utc         = [datetime]::UtcNow
+        Preview     = $preview
+    }
+    return $preview
 }
 
 function Invoke-GuiCleanupSteps {
@@ -537,7 +685,7 @@ function Invoke-GuiCleanupSteps {
     $Script:DoWuCacheWipe = [bool]$Script:GuiControls.ChkWuCache.Checked
     $Script:Report.Clear()
     $Script:RunStart = Get-Date
-    $Script:StartFree = Get-CFreeGB
+    $Script:StartFree = Get-CFreeGB -Refresh
     $Script:TempOlderThanDays = [int]$Script:GuiControls.DaysNum.Value
     $Script:TotalSteps = 3
     if ($Script:GuiControls.ChkCleanShader.Checked) { $Script:TotalSteps++ }
@@ -562,6 +710,8 @@ function Invoke-GuiCleanupSteps {
     } catch {
         if ($_.Exception.Message -match 'Cancelled') { Write-Warn "Cleanup cancelled" }
         else { throw }
+    } finally {
+        $Script:CleanupPreviewCache = $null
     }
 }
 
@@ -585,6 +735,9 @@ function Drain-UiEventQueue {
                 $lbl = Get-UiControl Status
                 if ($lbl) { $lbl.Text = [string]$item.Text }
                 Update-GuiStatusBar -JobText ([string]$item.Text)
+                if (Get-Command Set-PageLiveStatus -EA SilentlyContinue) {
+                    try { Set-PageLiveStatus -Text ([string]$item.Text) } catch { }
+                }
             }
             'Progress' { 
                 # apply locally without re-enqueue
@@ -614,6 +767,8 @@ function Invoke-GuiAction {
     $Script:CancelRequested = $false
     if ($Script:UiShare) { $Script:UiShare['CancelRequested'] = $false }
     Clear-TrackedProcesses
+    $Script:LiveStatusTarget = Resolve-LiveStatusTarget $Title
+    $refreshMode = Resolve-GuiRefreshMode $Title
     Set-GuiBusy $true
     Set-UiProgressValue 0
     Set-UiStatusText $Title
@@ -621,29 +776,28 @@ function Invoke-GuiAction {
     # Paint Stop/disabled buttons before long work (DoEvents keeps Cancel responsive later)
     Pump-Ui
 
+    $doneText = $null
     try {
         & $Action
         if (-not (Test-CancelRequested)) {
-            # Invalidate caches before UI refresh so score/device panels reflect just-applied fixes
-            $Script:DeviceSummaryCache = $null
-            $Script:OptimizationScoreCache = $null
-            Update-GuiHomeSummary
-            Update-GuiDevicePanel
-            Update-GuiGamingStatus
-            Set-UiStatusText ("Done - {0}" -f (Get-Elapsed))
-            Update-GuiStatusBar -JobText ("Done - {0}" -f (Get-Elapsed))
+            $doneText = ("Done - {0}" -f (Get-Elapsed))
+            Set-UiStatusText $doneText
+            Update-GuiStatusBar -JobText $doneText
         } else {
-            Set-UiStatusText "Cancelled"
-            Update-GuiStatusBar -JobText "Cancelled"
+            $doneText = "Cancelled"
+            Set-UiStatusText $doneText
+            Update-GuiStatusBar -JobText $doneText
         }
         Save-GuiSettings $Script:GuiControls
     } catch {
         if ($_.Exception.Message -match 'Cancelled') {
             Write-Warn "Cancelled by user"
-            Set-UiStatusText "Cancelled"
+            $doneText = "Cancelled"
+            Set-UiStatusText $doneText
         } else {
             Write-Fail $_.Exception.Message
-            Set-UiStatusText "Failed"
+            $doneText = "Failed"
+            Set-UiStatusText $doneText
             [void](Show-UiMessageBox `
                 -Text $_.Exception.Message `
                 -Caption "PC Maintenance" `
@@ -661,6 +815,9 @@ function Invoke-GuiAction {
         } else {
             Set-GuiBusy $false
             Pump-Ui
+            if ($doneText) {
+                Start-GuiDeferredRefresh -DoneText $doneText -Mode $refreshMode
+            }
         }
     }
 }
@@ -702,13 +859,22 @@ function Update-GuiHomeSummary {
     $badge = $Script:GuiControls.RebootBadge
     if ($badge) {
         $t = $Script:Theme
-        if (Test-RebootPending) {
-            $badge.Text = "Restart pending"
+        $info = Get-RebootPendingInfo
+        if ($info.Pending) {
+            $reason = if ($info.Reasons -and $info.Reasons.Count -gt 0) { $info.Reasons[0] } else { 'pending' }
+            $badge.Text = ("Reboot: {0}" -f $reason)
             $badge.ForeColor = $t.Warn
         } else {
             $badge.Text = "No restart pending"
             $badge.ForeColor = $t.Success
         }
+        try {
+            if ($Script:MainForm -and -not $Script:MainForm.IsDisposed) {
+                foreach ($c in $Script:MainForm.Controls) {
+                    if ($c.Tag -and $c.Tag.Reboot) { $c.Invalidate(); break }
+                }
+            }
+        } catch { }
     }
 
     # Keep the Home score card in sync without forcing a CIM refresh every time
@@ -842,6 +1008,7 @@ function Update-GuiOptimizationScore {
 }
 
 function Update-GuiGamingStatus {
+    param([switch]$SkipScore, [switch]$RefreshScore)
     $t = $Script:Theme
     $gm = Get-GameModeEnabled
     $dvr = Get-GameDvrEnabled
@@ -866,7 +1033,9 @@ function Update-GuiGamingStatus {
     Set-StatusVal $Script:GuiControls.PowerVal $power ($power -match 'Ultimate|High')
     Set-StatusVal $Script:GuiControls.DiscordVal $discordText ($discordText -eq "Off")
 
-    Update-GuiOptimizationScore
+    if (-not $SkipScore) {
+        Update-GuiOptimizationScore -Refresh:$RefreshScore
+    }
 }
 
 function Enable-GuiDpiAwareness {
@@ -1041,7 +1210,7 @@ function Show-MaintenanceGui {
             $chipFont = New-Object System.Drawing.Font("Segoe UI Semibold", 8.75)
             $chipFlags = [System.Windows.Forms.TextFormatFlags]::HorizontalCenter -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis
 
-            foreach ($chip in @(@{ Src = $sender.Tag.Free; Y = 18; W = 148 }, @{ Src = $sender.Tag.Reboot; Y = 50; W = 172 })) {
+            foreach ($chip in @(@{ Src = $sender.Tag.Free; Y = 18; W = 148 }, @{ Src = $sender.Tag.Reboot; Y = 50; W = 210 })) {
                 $src = $chip.Src
                 if (-not $src -or -not $src.Text) { continue }
                 $cw = $chip.W
@@ -1127,7 +1296,7 @@ function Show-MaintenanceGui {
     # ---- FOOTER HOST (Dock Bottom) ----
     $footerHost = New-Object System.Windows.Forms.Panel
     $footerHost.Dock = "Bottom"
-    $footerHost.Height = 200
+    $footerHost.Height = 220
     $footerHost.BackColor = $t.Bg
     $footerHost.Padding = New-Object System.Windows.Forms.Padding(24, 8, 24, 16)
     $form.Controls.Add($footerHost)
@@ -1410,6 +1579,9 @@ function Show-MaintenanceGui {
         BtnPresetFull   = $merged.BtnPresetFull
         ChkScheduleWeekly = $merged.ChkScheduleWeekly
         LblScheduleStatus = $merged.LblScheduleStatus
+        LblCleanupLive  = $merged.LblCleanupLive
+        LblUpdatesLive  = $merged.LblUpdatesLive
+        LblRepairLive   = $merged.LblRepairLive
     }
 
 
@@ -1436,20 +1608,54 @@ function Show-MaintenanceGui {
     Update-GuiCareScheduleStatus
 
     Set-ActiveNav "Home"
-    Update-GuiHomeSummary
-    Update-GuiDevicePanel
-    Update-GuiGamingStatus
-    Update-GuiStatusBar -JobText "Ready"
-    Append-UiLog ("PC Maintenance Kit v{0} ready" -f $Script:AppVersion) "Cyan"
+    # Paint the window first; heavy CIM/score scans run after Shown so launch
+    # does not stare at a blank desktop while PowerShell works invisibly.
+    if ($Script:GuiControls.CpuMain) { $Script:GuiControls.CpuMain.Text = "Scanning..." }
+    if ($Script:GuiControls.GpuMain) { $Script:GuiControls.GpuMain.Text = "Scanning..." }
+    if ($Script:GuiControls.RamMain) { $Script:GuiControls.RamMain.Text = "Scanning..." }
+    if ($Script:GuiControls.HomeScoreVal) { $Script:GuiControls.HomeScoreVal.Text = ".." }
+    if ($Script:GuiControls.HomeGradeVal) { $Script:GuiControls.HomeGradeVal.Text = "Reading hardware..." }
+    if ($Script:GuiControls.Free) { $Script:GuiControls.Free.Text = "C: free ..." }
+    if ($Script:GuiControls.RebootBadge) { $Script:GuiControls.RebootBadge.Text = "..." }
+    if ($Script:GuiControls.DeviceSummary) { $Script:GuiControls.DeviceSummary.Text = "Scanning hardware..." }
+    Update-GuiStatusBar -JobText "Starting..."
+    Append-UiLog ("PC Maintenance Kit v{0} starting..." -f $Script:AppVersion) "Cyan"
 
     $uiTimer = New-Object System.Windows.Forms.Timer
-    $uiTimer.Interval = 100
+    $uiTimer.Interval = 200
     $uiTimer.Add_Tick({
         Drain-UiEventQueue
         if ($Script:GuiBusy) { Pump-Ui }
     })
     $uiTimer.Start()
-    $form.Add_Shown({ Enable-DarkTitleBar $form })
+    $form.Add_Shown({
+        Enable-DarkTitleBar $form
+        $boot = New-Object System.Windows.Forms.Timer
+        $boot.Interval = 30
+        $boot.Add_Tick({
+            param($sender, $e)
+            try { $sender.Stop(); $sender.Dispose() } catch { }
+            try {
+                $Script:BootScanBusy = $true
+                Set-UiStatusText "Reading hardware..."
+                Update-GuiStatusBar -JobText "Reading hardware..."
+                Append-UiLog "Scanning device, score, and gaming status..." "Cyan"
+                Pump-Ui
+                Invoke-GuiPanelsRefresh -Mode Hardware -DoneText "Ready"
+                Update-GuiCareScheduleStatus
+                Append-UiLog ("Ready - v{0}" -f $Script:AppVersion) "Green"
+            } catch {
+                try {
+                    Set-UiStatusText "Ready"
+                    Update-GuiStatusBar -JobText "Ready"
+                    Append-UiLog ("Startup scan partial: {0}" -f $_.Exception.Message) "Yellow"
+                } catch { }
+            } finally {
+                $Script:BootScanBusy = $false
+            }
+        })
+        $boot.Start()
+    })
     $form.Add_FormClosing({
         param($sender, $e)
         if ($Script:ExitAfterUpdate) { return }
@@ -1467,14 +1673,26 @@ function Show-MaintenanceGui {
 
     if ($saved.CheckUpdatesOnStart) {
         $form.Add_Shown({
-            try {
-                Invoke-GuiAction -Title "Checking for updates" -Action {
-                    $check = Test-AppUpdateAvailable -Silent
-                    if ($check -and $check.Status -eq 'UpdateAvailable') {
-                        Show-UpdateAvailableDialog $check.Release
-                    }
+            $updBoot = New-Object System.Windows.Forms.Timer
+            $updBoot.Interval = 600
+            $updBoot.Add_Tick({
+                param($sender, $e)
+                if ($Script:GuiBusy -or $Script:BootScanBusy) {
+                    # Boot scan / other work still running — retry soon instead of dropping the check.
+                    $sender.Interval = 800
+                    return
                 }
-            } catch { }
+                try { $sender.Stop(); $sender.Dispose() } catch { }
+                try {
+                    Invoke-GuiAction -Title "Checking for updates" -Action {
+                        $check = Test-AppUpdateAvailable -Silent
+                        if ($check -and $check.Status -eq 'UpdateAvailable') {
+                            Show-UpdateAvailableDialog $check.Release
+                        }
+                    }
+                } catch { }
+            }.GetNewClosure())
+            $updBoot.Start()
         })
     }
 
@@ -1557,14 +1775,16 @@ function Show-MaintenanceGui {
             if ($logBox) { $logBox.Clear() }
             $Script:Report.Clear()
             $Script:RunStart = Get-Date
+            $Script:StartFree = Get-CFreeGB -Refresh
             $Script:TotalSteps = 2
             $Script:CurrentStep = 0
             $before = Get-GamingOptimizationScore -Refresh
             Append-UiLog ("Score before: {0}/100 ({1})" -f $before.Score, $before.Grade) "Cyan"
-            $after = Invoke-RecommendedOptimizationFixes -OpenTips
-            Update-GuiGamingStatus
+            $after = Invoke-RecommendedOptimizationFixes -OpenTips -BeforeScore $before
+            Update-GuiHomeSummary
+            Update-GuiGamingStatus -SkipScore
             Update-GuiDevicePanel
-            Update-GuiOptimizationScore -Refresh
+            Update-GuiOptimizationScore
             Append-UiLog ("Score after: {0}/100 ({1})  -  was {2}" -f $after.Score, $after.Grade, $before.Score) "Green"
             Show-RunSummaryDialog -Title "Fix my PC summary"
         }
@@ -1572,8 +1792,7 @@ function Show-MaintenanceGui {
 
     $btnRefreshHome.Add_Click({
         if ($Script:GuiBusy) { return }
-        Update-GuiHomeSummary -Refresh
-        Update-GuiGamingStatus
+        Invoke-GuiPanelsRefresh -Mode Hardware
         Update-GuiCareScheduleStatus
         Update-GuiStatusBar -JobText "Home refreshed"
     })
@@ -1717,8 +1936,11 @@ function Show-MaintenanceGui {
             $Script:TotalSteps = 2
             $Script:CurrentStep = 0
             Invoke-GamingOptimize
+            if (Get-Command Clear-HardwareProbeCaches -EA SilentlyContinue) { Clear-HardwareProbeCaches }
             Invoke-GamingChecks
-            Update-GuiGamingStatus
+            $Script:StartFree = Get-CFreeGB -Refresh
+            Update-GuiHomeSummary
+            Update-GuiGamingStatus -RefreshScore
             Update-GuiDevicePanel
             Show-RunSummaryDialog -Title "Gaming optimize summary"
         }
@@ -1730,12 +1952,14 @@ function Show-MaintenanceGui {
             if ($logBox) { $logBox.Clear() }
             $Script:Report.Clear()
             $Script:RunStart = Get-Date
+            $Script:StartFree = Get-CFreeGB -Refresh
             $Script:TotalSteps = 2
             $Script:CurrentStep = 0
             [void](Invoke-RecommendedOptimizationFixes -OpenTips)
-            Update-GuiGamingStatus
+            Update-GuiHomeSummary
+            Update-GuiGamingStatus -SkipScore
             Update-GuiDevicePanel
-            Update-GuiOptimizationScore -Refresh
+            Update-GuiOptimizationScore
             Show-RunSummaryDialog -Title "Optimization fixes summary"
         }
     })
@@ -1787,8 +2011,7 @@ function Show-MaintenanceGui {
 
     $btnRefreshGame.Add_Click({
         if ($Script:GuiBusy) { return }
-        Update-GuiGamingStatus
-        Update-GuiOptimizationScore -Refresh
+        Update-GuiGamingStatus -RefreshScore
         Update-GuiStatusBar -JobText "Gaming status refreshed"
     })
 
@@ -1814,8 +2037,8 @@ function Show-MaintenanceGui {
     })
 
     $btnRefreshDevice.Add_Click({
-        Update-GuiDevicePanel
-        Update-GuiHomeSummary
+        if ($Script:GuiBusy) { return }
+        Invoke-GuiPanelsRefresh -Mode Hardware
         Update-GuiStatusBar -JobText "Device refreshed"
         Invoke-GuiAction -Title "Device report" -Action {
             $Script:Report.Clear()

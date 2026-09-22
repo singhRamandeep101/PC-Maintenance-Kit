@@ -97,13 +97,21 @@ function Save-GuiSettings {
                 if (-not $obj.Contains($k)) { $obj[$k] = $Script:LoadedGuiSettings[$k] }
             }
         }
-        foreach ($k in (Get-DefaultGuiSettings).Keys) {
-            if (-not $obj.Contains($k)) { $obj[$k] = (Get-DefaultGuiSettings)[$k] }
+        if (-not $Script:DefaultGuiSettingsCache) {
+            $Script:DefaultGuiSettingsCache = Get-DefaultGuiSettings
+        }
+        foreach ($k in $Script:DefaultGuiSettingsCache.Keys) {
+            if (-not $obj.Contains($k)) { $obj[$k] = $Script:DefaultGuiSettingsCache[$k] }
+        }
+        $json = ($obj | ConvertTo-Json -Depth 5)
+        if ($Script:LastSavedGuiSettingsJson -and $Script:LastSavedGuiSettingsJson -eq $json) {
+            $Script:LoadedGuiSettings = $obj
+            return
         }
         $Script:LoadedGuiSettings = $obj
-        $json = ($obj | ConvertTo-Json -Depth 5)
         $utf8 = New-Object System.Text.UTF8Encoding $false
         [System.IO.File]::WriteAllText((Get-GuiSettingsPath), $json, $utf8)
+        $Script:LastSavedGuiSettingsJson = $json
     } catch {
         Write-Warn ("Could not save GUI settings: {0}" -f $_.Exception.Message)
     }
@@ -178,14 +186,33 @@ function Get-FolderSizeBytes {
     if (-not (Test-PathSafe $Path)) { return 0L }
     $cutoff = (Get-Date).AddDays(-$OlderThanDays)
     $sum = 0L
+    $n = 0
     try {
-        Get-ChildItem -LiteralPath $Path -Recurse -Force -File -EA SilentlyContinue |
-            Where-Object { $OlderThanDays -le 0 -or $_.LastWriteTime -lt $cutoff } |
-            ForEach-Object {
-                $sum += $_.Length
-                if (($sum % 200) -eq 0) { Pump-UiThrottled }
+        $rootInfo = [System.IO.DirectoryInfo]::new($Path)
+        foreach ($f in $rootInfo.EnumerateFiles('*', [System.IO.SearchOption]::AllDirectories)) {
+            if ((Get-Command Test-CancelRequested -EA SilentlyContinue) -and (Test-CancelRequested)) { break }
+            if ($OlderThanDays -gt 0 -and $f.LastWriteTime -ge $cutoff) { continue }
+            $sum += $f.Length
+            $n++
+            if (($n % 80) -eq 0) {
+                if (Get-Command Update-CleanupLiveStatus -EA SilentlyContinue) {
+                    $label = Split-Path $Path -Leaf
+                    Update-CleanupLiveStatus -PathLabel ("Preview {0}" -f $label) -Files $n -Bytes $sum
+                }
+                Pump-UiThrottled
             }
-    } catch { }
+        }
+    } catch {
+        try {
+            $items = Get-ChildItem -LiteralPath $Path -Recurse -Force -File -EA SilentlyContinue
+            foreach ($f in $items) {
+                if ($OlderThanDays -gt 0 -and $f.LastWriteTime -ge $cutoff) { continue }
+                $sum += $f.Length
+                $n++
+                if (($n % 80) -eq 0) { Pump-UiThrottled }
+            }
+        } catch { }
+    }
     return $sum
 }
 
@@ -231,6 +258,7 @@ function Get-CleanupPreview {
     )
     foreach ($p in $tempPaths) {
         if (-not (Test-PathSafe $p)) { continue }
+        Write-Info ("Measuring {0}" -f $p)
         $bytes = Get-FolderSizeBytes $p $TempOlderThanDays
         if ($bytes -le 0 -and -not (Test-PathSafe $p)) { continue }
         $total += $bytes
@@ -245,6 +273,7 @@ function Get-CleanupPreview {
     $browserMap = Get-BrowserCachePaths
     foreach ($browser in $browserMap.Keys) {
         foreach ($p in $browserMap[$browser]) {
+            Write-Info ("Measuring {0}" -f $p)
             $bytes = Get-FolderSizeBytes $p 0
             $total += $bytes
             [void]$rows.Add([pscustomobject]@{
@@ -396,7 +425,7 @@ function Get-RunSummaryObject {
     $ok = @($Script:Report | Where-Object { $_ -like '[OK]*' }).Count
     $warn = @($Script:Report | Where-Object { $_ -like '[!]*' }).Count
     $fail = @($Script:Report | Where-Object { $_ -like '[X]*' }).Count
-    $end = Get-CFreeGB
+    $end = Get-CFreeGB -Refresh
     if (-not $Script:StartFree) { $Script:StartFree = $end }
     $gained = [math]::Round($end - $Script:StartFree, 1)
     return [pscustomobject]@{
@@ -407,7 +436,7 @@ function Get-RunSummaryObject {
         OkCount       = $ok
         WarnCount     = $warn
         FailCount     = $fail
-        RebootPending = [bool](Test-RebootPending)
+        RebootPending = [bool](Test-RebootPending -Refresh)
         ReportLines   = @($Script:Report)
     }
 }

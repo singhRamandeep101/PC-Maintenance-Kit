@@ -37,7 +37,7 @@ function Add-GuiHomePage {
 
         # Score hero (Dock Top added last = sits above System Summary)
         $cardHomeScore = New-CardPanel "Your PC for gaming" "Top"
-        $cardHomeScore.Height = 148
+        $cardHomeScore.Height = 178
         $cardHomeScore.Padding = New-Object System.Windows.Forms.Padding(0, 0, 0, 8)
         $homeLeft.Controls.Add($cardHomeScore)
 
@@ -74,7 +74,7 @@ function Add-GuiHomePage {
         $homeFixesVal.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
         $homeFixesVal.ForeColor = $t.Muted
         $homeFixesVal.Location = New-Object System.Drawing.Point(20, 108)
-        $homeFixesVal.Size = New-Object System.Drawing.Size(480, 36)
+        $homeFixesVal.Size = New-Object System.Drawing.Size(480, 58)
         $homeFixesVal.Anchor = "Top,Left,Right"
         $homeFixesVal.BackColor = [System.Drawing.Color]::Transparent
         $cardHomeScore.Controls.Add($homeFixesVal)
@@ -101,70 +101,92 @@ function Add-GuiHomePage {
         $homeSplit.Controls.Add($homeRight, 1, 0)
 
         $cardOpts = New-CardPanel "Maintenance Options" "Fill"
+        $cardOpts.AutoScroll = $true
         $homeRight.Controls.Add($cardOpts)
 
-        $chkHomeRestore = New-PremiumCheck "Create restore point" (New-Object System.Drawing.Point(20, 48)) $true
-        $chkHomeShader = New-PremiumCheck "Clear GPU shader caches" (New-Object System.Drawing.Point(20, 82)) $true
-        $chkHomeGaming = New-PremiumCheck "Apply gaming optimizations" (New-Object System.Drawing.Point(20, 116)) $true
-        $chkHomeWU = New-PremiumCheck "Windows Update (slow)" (New-Object System.Drawing.Point(20, 150)) $false
-        $chkHomeWinget = New-PremiumCheck "winget app upgrades (slow)" (New-Object System.Drawing.Point(20, 184)) $false
+        $btnFixMyPc = New-PremiumButton "Fix my PC for gaming" (New-Object System.Drawing.Point(20, 48)) (New-Object System.Drawing.Size(360, 44)) "Cta"
+        $btnWeekly = New-PremiumButton "Run Weekly Full" (New-Object System.Drawing.Point(20, 100)) (New-Object System.Drawing.Size(240, 40)) "Primary"
+        $btnRefreshHome = New-PremiumButton "Refresh" (New-Object System.Drawing.Point(270, 100)) (New-Object System.Drawing.Size(110, 40)) "Ghost"
+        $cardOpts.Controls.AddRange(@($btnFixMyPc, $btnWeekly, $btnRefreshHome))
+
+        $chkHomeRestore = New-PremiumCheck "Create restore point" (New-Object System.Drawing.Point(20, 156)) $true
+        $chkHomeShader = New-PremiumCheck "Clear GPU shader caches" (New-Object System.Drawing.Point(20, 184)) $true
+        $chkHomeGaming = New-PremiumCheck "Apply gaming optimizations" (New-Object System.Drawing.Point(20, 212)) $true
+        $chkHomeWU = New-PremiumCheck "Windows Update (slow)" (New-Object System.Drawing.Point(20, 240)) $false
+        $chkHomeWinget = New-PremiumCheck "winget app upgrades (slow)" (New-Object System.Drawing.Point(20, 268)) $false
         $cardOpts.Controls.AddRange(@($chkHomeRestore, $chkHomeShader, $chkHomeGaming, $chkHomeWU, $chkHomeWinget))
 
         $presetLbl = New-Object System.Windows.Forms.Label
         $presetLbl.Text = "Presets"
         $presetLbl.ForeColor = $t.Muted
-        $presetLbl.Location = New-Object System.Drawing.Point(20, 220)
+        $presetLbl.Location = New-Object System.Drawing.Point(20, 304)
         $presetLbl.AutoSize = $true
         $cardOpts.Controls.Add($presetLbl)
 
-        $btnPresetGamer = New-PremiumButton "Gamer" (New-Object System.Drawing.Point(20, 242)) (New-Object System.Drawing.Size(100, 34)) "Ghost"
-        $btnPresetQuiet = New-PremiumButton "Quiet" (New-Object System.Drawing.Point(130, 242)) (New-Object System.Drawing.Size(100, 34)) "Ghost"
-        $btnPresetFull = New-PremiumButton "Full" (New-Object System.Drawing.Point(240, 242)) (New-Object System.Drawing.Size(100, 34)) "Ghost"
+        $btnPresetGamer = New-PremiumButton "Gamer" (New-Object System.Drawing.Point(20, 326)) (New-Object System.Drawing.Size(100, 34)) "Ghost"
+        $btnPresetQuiet = New-PremiumButton "Quiet" (New-Object System.Drawing.Point(130, 326)) (New-Object System.Drawing.Size(100, 34)) "Ghost"
+        $btnPresetFull = New-PremiumButton "Full" (New-Object System.Drawing.Point(240, 326)) (New-Object System.Drawing.Size(100, 34)) "Ghost"
         $cardOpts.Controls.AddRange(@($btnPresetGamer, $btnPresetQuiet, $btnPresetFull))
 
-        $chkScheduleWeekly = New-PremiumCheck "Schedule Weekly Full (Sundays 6 PM)" (New-Object System.Drawing.Point(20, 286)) $false
+        $chkScheduleWeekly = New-PremiumCheck "Schedule Weekly Full (Sundays 6 PM)" (New-Object System.Drawing.Point(20, 370)) $false
         $cardOpts.Controls.Add($chkScheduleWeekly)
 
         $lblScheduleStatus = New-Object System.Windows.Forms.Label
         $lblScheduleStatus.Text = "Weekly schedule: off"
         $lblScheduleStatus.ForeColor = $t.Muted
-        $lblScheduleStatus.Location = New-Object System.Drawing.Point(20, 318)
+        $lblScheduleStatus.Location = New-Object System.Drawing.Point(20, 400)
         $lblScheduleStatus.Size = New-Object System.Drawing.Size(360, 18)
         $cardOpts.Controls.Add($lblScheduleStatus)
-
-        $btnFixMyPc = New-PremiumButton "Fix my PC for gaming" (New-Object System.Drawing.Point(20, 350)) (New-Object System.Drawing.Size(360, 48)) "Cta"
-        $btnWeekly = New-PremiumButton "Run Weekly Full" (New-Object System.Drawing.Point(20, 406)) (New-Object System.Drawing.Size(250, 44)) "Primary"
-        $btnRefreshHome = New-PremiumButton "Refresh" (New-Object System.Drawing.Point(282, 406)) (New-Object System.Drawing.Size(110, 44)) "Ghost"
-        $cardOpts.Controls.AddRange(@($btnFixMyPc, $btnWeekly, $btnRefreshHome))
 
         $nextLbl = New-Object System.Windows.Forms.Label
         $nextLbl.Text = "Presets fill the checkboxes. Schedule runs your saved Home options while signed in."
         $nextLbl.ForeColor = $t.Muted
-        $nextLbl.Location = New-Object System.Drawing.Point(20, 458)
+        $nextLbl.Location = New-Object System.Drawing.Point(20, 424)
         $nextLbl.Size = New-Object System.Drawing.Size(360, 36)
         $cardOpts.Controls.Add($nextLbl)
 
-        $cardOpts.Add_Resize({
+        $layoutHomeOpts = {
             param($sender, $e)
-            $wFull = [math]::Max(180, $sender.ClientSize.Width - 40)
-            $btnPresetGamer.Width = [math]::Max(80, [math]::Floor(($wFull - 20) / 3))
-            $btnPresetQuiet.Width = $btnPresetGamer.Width
-            $btnPresetFull.Width = $btnPresetGamer.Width
-            $btnPresetQuiet.Left = $btnPresetGamer.Left + $btnPresetGamer.Width + 10
-            $btnPresetFull.Left = $btnPresetQuiet.Left + $btnPresetQuiet.Width + 10
-            $lblScheduleStatus.Width = $wFull
-            $yFix = $sender.ClientSize.Height - 140
-            $btnFixMyPc.Top = $yFix
-            $btnFixMyPc.Width = $wFull
-            $yWeek = $sender.ClientSize.Height - 84
-            $btnWeekly.Top = $yWeek
-            $btnRefreshHome.Top = $yWeek
-            $btnWeekly.Width = [math]::Max(160, $sender.ClientSize.Width - 160)
-            $btnRefreshHome.Left = $btnWeekly.Left + $btnWeekly.Width + 12
-            $btnRefreshHome.Width = 110
-            $nextLbl.Top = $sender.ClientSize.Height - 36
-            $nextLbl.Width = $wFull
-        }.GetNewClosure())
+            $pad = 20
+            $w = [math]::Max(180, $sender.ClientSize.Width - ($pad * 2))
+            $y = 48
+
+            $btnFixMyPc.SetBounds($pad, $y, $w, 44)
+            $y += 54
+
+            $refreshW = 110
+            $gap = 10
+            $weekW = [math]::Max(140, $w - $refreshW - $gap)
+            $btnWeekly.SetBounds($pad, $y, $weekW, 40)
+            $btnRefreshHome.SetBounds(($pad + $weekW + $gap), $y, $refreshW, 40)
+            $y += 52
+
+            foreach ($chk in @($chkHomeRestore, $chkHomeShader, $chkHomeGaming, $chkHomeWU, $chkHomeWinget)) {
+                $chk.Location = New-Object System.Drawing.Point($pad, $y)
+                $y += 28
+            }
+
+            $y += 8
+            $presetLbl.Location = New-Object System.Drawing.Point($pad, $y)
+            $y += 22
+            $pw = [math]::Max(80, [int][math]::Floor(($w - 20) / 3.0))
+            $btnPresetGamer.SetBounds($pad, $y, $pw, 34)
+            $btnPresetQuiet.SetBounds(($pad + $pw + 10), $y, $pw, 34)
+            $btnPresetFull.SetBounds(($pad + (2 * ($pw + 10))), $y, $pw, 34)
+            $y += 44
+
+            $chkScheduleWeekly.Location = New-Object System.Drawing.Point($pad, $y)
+            $y += 28
+            $lblScheduleStatus.SetBounds($pad, $y, $w, 18)
+            $y += 22
+            $nextLbl.SetBounds($pad, $y, $w, 36)
+            $y += 44
+
+            $sender.AutoScrollMinSize = New-Object System.Drawing.Size(0, $y)
+        }.GetNewClosure()
+
+        $cardOpts.Add_Resize($layoutHomeOpts)
+        [void]$layoutHomeOpts.Invoke($cardOpts, $null)
 
 
     return [ordered]@{
@@ -236,8 +258,17 @@ function Add-GuiCleanupPage {
         $chkWuCache = New-PremiumCheck "Windows Update download cache (stops wuauserv briefly)" (New-Object System.Drawing.Point(20, 280)) $false
         $cardClean.Controls.AddRange(@($chkCleanShader, $chkSteam, $chkEpic, $chkRiot, $chkWuCache))
 
-        $btnPreview = New-PremiumButton "Preview sizes" (New-Object System.Drawing.Point(20, 320)) (New-Object System.Drawing.Size(140, 44)) "Ghost"
-        $btnCleanup = New-PremiumButton "Run Cleanup" (New-Object System.Drawing.Point(20, 320)) (New-Object System.Drawing.Size(200, 44)) "Primary"
+        $lblCleanupLive = New-Object System.Windows.Forms.Label
+        $lblCleanupLive.Text = "Ready - preview sizes or run cleanup."
+        $lblCleanupLive.ForeColor = $t.Muted
+        $lblCleanupLive.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+        $lblCleanupLive.Location = New-Object System.Drawing.Point(20, 318)
+        $lblCleanupLive.Size = New-Object System.Drawing.Size(900, 22)
+        $lblCleanupLive.Anchor = "Left,Right,Bottom"
+        $cardClean.Controls.Add($lblCleanupLive)
+
+        $btnPreview = New-PremiumButton "Preview sizes" (New-Object System.Drawing.Point(20, 350)) (New-Object System.Drawing.Size(140, 44)) "Ghost"
+        $btnCleanup = New-PremiumButton "Run Cleanup" (New-Object System.Drawing.Point(20, 350)) (New-Object System.Drawing.Size(200, 44)) "Primary"
         $btnCleanup.Anchor = "Bottom,Right"
         $btnPreview.Anchor = "Bottom,Left"
         $cardClean.Controls.AddRange(@($btnPreview, $btnCleanup))
@@ -245,10 +276,12 @@ function Add-GuiCleanupPage {
             param($sender, $e)
             # Never ride up over the last checkbox on short windows
             $floor = $chkWuCache.Bottom + 16
-            $top = [math]::Max($floor, $sender.ClientSize.Height - 60)
+            $top = [math]::Max($floor + 30, $sender.ClientSize.Height - 60)
             $btnCleanup.Left = [math]::Max(180, $sender.ClientSize.Width - 220)
             $btnCleanup.Top = $top
             $btnPreview.Top = $top
+            $lblCleanupLive.Top = $top - 28
+            $lblCleanupLive.Width = [math]::Max(200, $sender.ClientSize.Width - 40)
             $cleanHint.Width = $sender.ClientSize.Width - 40
         }.GetNewClosure())
 
@@ -262,6 +295,7 @@ function Add-GuiCleanupPage {
         ChkSteam = $chkSteam
         ChkWuCache = $chkWuCache
         DaysNum = $daysNum
+        LblCleanupLive = $lblCleanupLive
     }
 }
 
@@ -287,6 +321,15 @@ function Add-GuiUpdatesPage {
         $chkUpdWinget = New-PremiumCheck "winget upgrades" (New-Object System.Drawing.Point(20, 168)) $true
         $cardUpd.Controls.AddRange(@($chkUpdRestore, $chkUpdWU, $chkUpdWinget))
 
+        $lblUpdatesLive = New-Object System.Windows.Forms.Label
+        $lblUpdatesLive.Text = "Ready - Windows Update and winget when you need them."
+        $lblUpdatesLive.ForeColor = $t.Muted
+        $lblUpdatesLive.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+        $lblUpdatesLive.Location = New-Object System.Drawing.Point(20, 210)
+        $lblUpdatesLive.Size = New-Object System.Drawing.Size(900, 22)
+        $lblUpdatesLive.Anchor = "Left,Right,Bottom"
+        $cardUpd.Controls.Add($lblUpdatesLive)
+
         $btnUpdates = New-PremiumButton "Run Updates" (New-Object System.Drawing.Point(20, 240)) (New-Object System.Drawing.Size(180, 44)) "Primary"
         $btnAmd = New-PremiumButton "Open AMD Adrenalin" (New-Object System.Drawing.Point(220, 240)) (New-Object System.Drawing.Size(200, 44)) "Ghost"
         $btnNv = New-PremiumButton "Open NVIDIA App" (New-Object System.Drawing.Point(440, 240)) (New-Object System.Drawing.Size(180, 44)) "Ghost"
@@ -300,6 +343,8 @@ function Add-GuiUpdatesPage {
             $btnUpdates.Top = $y
             $btnAmd.Top = $y
             $btnNv.Top = $y
+            $lblUpdatesLive.Top = $y - 28
+            $lblUpdatesLive.Width = [math]::Max(200, $sender.ClientSize.Width - 40)
             $updHint.Width = $sender.ClientSize.Width - 40
         }.GetNewClosure())
 
@@ -311,6 +356,7 @@ function Add-GuiUpdatesPage {
         ChkUpdRestore = $chkUpdRestore
         ChkUpdWinget = $chkUpdWinget
         ChkUpdWU = $chkUpdWU
+        LblUpdatesLive = $lblUpdatesLive
     }
 }
 
@@ -486,15 +532,36 @@ function Add-GuiRepairPage {
         $chkRepRestore = New-PremiumCheck "Create restore point first" (New-Object System.Drawing.Point(20, 100)) $true
         $cardRepair.Controls.Add($chkRepRestore)
 
-        $btnRepair = New-PremiumButton "Run DISM + SFC" (New-Object System.Drawing.Point(20, 160)) (New-Object System.Drawing.Size(200, 48)) "Danger"
-        $btnRestoreOnly = New-PremiumButton "Restore point only" (New-Object System.Drawing.Point(240, 160)) (New-Object System.Drawing.Size(200, 48)) "Ghost"
+        $lblRepairLive = New-Object System.Windows.Forms.Label
+        $lblRepairLive.Text = "Ready - only run when Windows feels broken."
+        $lblRepairLive.ForeColor = $t.Muted
+        $lblRepairLive.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+        $lblRepairLive.Location = New-Object System.Drawing.Point(20, 140)
+        $lblRepairLive.Size = New-Object System.Drawing.Size(900, 22)
+        $lblRepairLive.Anchor = "Left,Right,Bottom"
+        $cardRepair.Controls.Add($lblRepairLive)
+
+        $btnRepair = New-PremiumButton "Run DISM + SFC" (New-Object System.Drawing.Point(20, 180)) (New-Object System.Drawing.Size(200, 48)) "Danger"
+        $btnRestoreOnly = New-PremiumButton "Restore point only" (New-Object System.Drawing.Point(240, 180)) (New-Object System.Drawing.Size(200, 48)) "Ghost"
+        $btnRepair.Anchor = "Bottom,Left"
+        $btnRestoreOnly.Anchor = "Bottom,Left"
         $cardRepair.Controls.AddRange(@($btnRepair, $btnRestoreOnly))
+        $cardRepair.Add_Resize({
+            param($sender, $e)
+            $y = $sender.ClientSize.Height - 64
+            $btnRepair.Top = $y
+            $btnRestoreOnly.Top = $y
+            $lblRepairLive.Top = $y - 28
+            $lblRepairLive.Width = [math]::Max(200, $sender.ClientSize.Width - 40)
+            $repHint.Width = $sender.ClientSize.Width - 40
+        }.GetNewClosure())
 
 
     return [ordered]@{
         BtnRepair = $btnRepair
         BtnRestoreOnly = $btnRestoreOnly
         ChkRepRestore = $chkRepRestore
+        LblRepairLive = $lblRepairLive
     }
 }
 

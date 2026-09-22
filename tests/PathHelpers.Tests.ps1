@@ -107,6 +107,17 @@ Assert-True ($freedBytes -gt 0) 'Cleanup reports freed bytes'
 Assert-True (Test-Path -LiteralPath $cleanRoot) 'Cleanup never deletes the root it was given'
 Remove-Item -LiteralPath $cleanRoot -Recurse -Force -EA SilentlyContinue
 
+# Read-only files must still delete (Remove-Item -Force, not FileInfo.Delete)
+$roRoot = Join-Path $env:TEMP ('pcmk-ro-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Path $roRoot -Force | Out-Null
+$roFile = Join-Path $roRoot 'readonly.tmp'
+Set-Content -LiteralPath $roFile -Value 'x' -Encoding ASCII
+(Get-Item -LiteralPath $roFile).IsReadOnly = $true
+$roFreed = Remove-OldFilesInPath -Path $roRoot -OlderThanDays 0 -DeleteFoldersToo
+Assert-True (-not (Test-Path -LiteralPath $roFile)) 'Cleanup deletes read-only files'
+Assert-True ($roFreed -gt 0) 'Cleanup reports bytes for read-only deletes'
+Remove-Item -LiteralPath $roRoot -Recurse -Force -EA SilentlyContinue
+
 $settings = Get-DefaultGuiSettings
 Assert-True ($settings.HomeWU -eq $false) 'Default HomeWU is false'
 Assert-True ($settings.HomeWinget -eq $false) 'Default HomeWinget is false'
@@ -320,6 +331,42 @@ Assert-True ($null -ne $summary -and $summary.Cpu) 'Get-DeviceSummary returns CP
 $summary2 = Get-DeviceSummary
 Assert-True ([object]::ReferenceEquals($summary, $summary2)) 'Get-DeviceSummary cache returns same object'
 
+# Reboot-pending must use hard WU/CBS signals only. Stale PendingFileRenameOperations
+# (Gaming Services / InstallShield temp leftovers) must not tank Hygiene forever.
+$ri = Get-RebootPendingInfo
+Assert-True ($null -ne $ri) 'Get-RebootPendingInfo returns object'
+Assert-True ($ri.PSObject.Properties.Name -contains 'Pending') 'Get-RebootPendingInfo has Pending'
+Assert-True ($ri.PSObject.Properties.Name -contains 'Reasons') 'Get-RebootPendingInfo has Reasons'
+Assert-True (((Test-RebootPending) -is [bool])) 'Test-RebootPending returns bool'
+$hardWu = Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"
+$hardCbs = Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+$hardOrch = Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Orchestrator\RebootRequired"
+$hardAny = $hardWu -or $hardCbs -or $hardOrch
+Assert-True (([bool]$ri.Pending) -eq $hardAny) 'Reboot pending matches hard WU/CBS/Orchestrator keys only'
+Assert-True (([bool](Test-RebootPending)) -eq ([bool]$ri.Pending)) 'Test-RebootPending matches Get-RebootPendingInfo.Pending'
+Assert-True ($ri.Reasons -is [System.Array] -or $ri.Reasons -is [string[]] -or $null -ne $ri.Reasons) 'Get-RebootPendingInfo.Reasons is a collection'
+if ($ri.Pending) {
+    Assert-True (@($ri.Reasons).Count -gt 0) 'Pending reboot includes at least one reason'
+} else {
+    Assert-True (@($ri.Reasons).Count -eq 0) 'No pending reboot means empty Reasons'
+}
+$coreRebootRaw = Get-Content (Join-Path $Root 'lib\Core.ps1') -Raw
+Assert-True ($coreRebootRaw -match 'PendingFileRenameOperations is intentionally ignored') 'Core documents ignoring noisy PendingFileRenameOperations'
+
+Assert-True ((Format-UiByteSize 0) -eq '0 B') 'Format-UiByteSize 0 B'
+Assert-True ((Format-UiByteSize 512) -eq '512 B') 'Format-UiByteSize bytes'
+Assert-True ((Format-UiByteSize 2048) -eq '2 KB') 'Format-UiByteSize KB'
+Assert-True ((Format-UiByteSize 5MB) -eq '5 MB') 'Format-UiByteSize MB'
+Assert-True ((Format-UiByteSize 1536MB) -match 'GB') 'Format-UiByteSize GB'
+Assert-True ($null -ne (Get-Command Update-UiSubProgress -EA SilentlyContinue)) 'Update-UiSubProgress exists'
+Assert-True ($null -ne (Get-Command Clear-HardwareProbeCaches -EA SilentlyContinue)) 'Clear-HardwareProbeCaches exists'
+$free1 = Get-CFreeGB
+$free2 = Get-CFreeGB
+Assert-True ($free1 -eq $free2) 'Get-CFreeGB cache returns stable value'
+$prot1 = Get-ProtectedCleanupPaths
+$prot2 = Get-ProtectedCleanupPaths
+Assert-True ([object]::ReferenceEquals($prot1, $prot2)) 'Get-ProtectedCleanupPaths caches the protected list'
+
 . (Join-Path $Root 'lib\Score.ps1')
 $scoreErr = $null
 $optScore = $null
@@ -337,6 +384,15 @@ Assert-True ($null -ne $optScore.TopFixes) 'Score has TopFixes'
 Assert-True ($null -ne $optScore.HardwareReadiness) 'Score has HardwareReadiness'
 $weightSum = ($optScore.Categories | Measure-Object -Property Weight -Sum).Sum
 Assert-True ([math]::Abs($weightSum - 1.0) -lt 0.001) 'Category weights sum to 1.0'
+$hygCat = @($optScore.Categories | Where-Object { $_.Name -eq 'Hygiene' } | Select-Object -First 1)
+Assert-True ($null -ne $hygCat) 'Score includes Hygiene category'
+if (-not $hardAny) {
+    Assert-True ($hygCat.Score -eq 100) 'Hygiene is 100 when no hard reboot signal'
+    $rebootCheck = @($optScore.Checks | Where-Object { $_.Id -eq 'reboot_pending' } | Select-Object -First 1)
+    Assert-True ($null -ne $rebootCheck -and $rebootCheck.Status -eq 'Good') 'reboot_pending is Good without hard reboot signal'
+}
+$hagsCheck = @($optScore.Checks | Where-Object { $_.Id -eq 'hags' } | Select-Object -First 1)
+Assert-True ($null -ne $hagsCheck -and $hagsCheck.Points -eq $hagsCheck.Max) 'HAGS does not soft-cap points when off/unknown'
 $optScore2 = Get-GamingOptimizationScore
 Assert-True ([object]::ReferenceEquals($optScore, $optScore2)) 'Optimization score cache returns same object'
 $shortTxt = Format-OptimizationScoreText -ScoreObject $optScore -Short
@@ -419,7 +475,11 @@ Assert-True ($guiRaw -match 'BtnCli') 'GuiBusy list covers the CLI button'
 Assert-True ($guiRaw -match 'BtnQuit') 'GuiBusy list covers the Quit button'
 Assert-True ($guiRaw -match 'FormClosing') 'Gui blocks close while busy'
 Assert-True ($guiRaw -match 'Checking for updates') 'Startup update check runs under GuiBusy'
-Assert-True ($guiRaw -match 'OptimizationScoreCache\s*=\s*\$null') 'Gui invalidates the score cache after actions'
+Assert-True ($guiRaw -match 'Clear-HardwareProbeCaches|Invoke-GuiPanelsRefresh') 'Gui refreshes panels through a shared orchestrator'
+Assert-True ($guiRaw -match 'Resolve-GuiRefreshMode') 'Gui chooses refresh mode by action'
+Assert-True ($coreRaw -match 'function Clear-HardwareProbeCaches') 'Core exposes Clear-HardwareProbeCaches'
+Assert-True ($coreRaw -match 'EnumerateFiles') 'Cleanup streams files via EnumerateFiles'
+Assert-True ($guiRaw -match 'CleanupPreviewCache') 'Gui caches recent cleanup previews'
 Assert-True ($guiRaw -match 'add_ThreadException') 'Gui installs an unhandled-exception perimeter'
 # Restart must never fire from a DoEvents-delivered click during a job
 $restartClick = ($guiRaw -split 'btnRestartNow\.Add_Click')[1]

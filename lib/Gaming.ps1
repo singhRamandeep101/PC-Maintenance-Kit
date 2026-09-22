@@ -50,19 +50,29 @@ function Enable-UltimatePerformancePlan {
     $out = powercfg /list 2>$null | Out-String
     if ($out -match '([0-9a-fA-F-]{36}).*\(Ultimate Performance\)') {
         powercfg /setactive $Matches[1] | Out-Null
+        $Script:PowerPlanCache = $null
         return $true
     }
     $high = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
     powercfg /setactive $high 2>$null | Out-Null
+    $Script:PowerPlanCache = $null
     return $false
 }
 
 function Get-ActivePowerPlanName {
-    try {
-        return ((powercfg /getactivescheme) -replace '.*\((.+)\).*', '$1').Trim()
-    } catch {
-        return "Unknown"
+    param([switch]$Refresh)
+    if (-not $Refresh -and $null -ne $Script:PowerPlanCache -and (([datetime]::UtcNow - $Script:PowerPlanCacheUtc).TotalSeconds -lt 20)) {
+        return $Script:PowerPlanCache
     }
+    $name = "Unknown"
+    try {
+        $name = ((powercfg /getactivescheme) -replace '.*\((.+)\).*', '$1').Trim()
+    } catch {
+        $name = "Unknown"
+    }
+    $Script:PowerPlanCache = $name
+    $Script:PowerPlanCacheUtc = [datetime]::UtcNow
+    return $name
 }
 
 function Get-DiscordSettingsPath {

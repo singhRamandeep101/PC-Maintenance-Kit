@@ -30,25 +30,35 @@ function New-OptimizationCheck {
 }
 
 function Get-PrimaryVideoController {
+    param([switch]$Refresh)
+    if (-not $Refresh -and $null -ne $Script:PrimaryVideoCache -and (([datetime]::UtcNow - $Script:PrimaryVideoCacheUtc).TotalSeconds -lt 30)) {
+        return $Script:PrimaryVideoCache
+    }
+    $vc = $null
     try {
         $gpus = @(Get-CimInstance Win32_VideoController -EA SilentlyContinue |
             Where-Object { $_.Name -and $_.Name -notmatch 'Basic|Remote|Microsoft Basic' } |
             Sort-Object { if ($_.AdapterRAM -gt 0) { -$_.AdapterRAM } else { 0 } })
-        if ($gpus.Count) { return $gpus[0] }
-        return Get-CimInstance Win32_VideoController -EA SilentlyContinue | Select-Object -First 1
+        if ($gpus.Count) { $vc = $gpus[0] }
+        else { $vc = Get-CimInstance Win32_VideoController -EA SilentlyContinue | Select-Object -First 1 }
     } catch {
-        return $null
+        $vc = $null
     }
+    $Script:PrimaryVideoCache = $vc
+    $Script:PrimaryVideoCacheUtc = [datetime]::UtcNow
+    return $vc
 }
 
 function Get-DisplayRefreshInfo {
+    param($VideoController = $null)
     $info = [pscustomobject]@{
         CurrentHz = $null
         MaxHz     = $null
         Adapter   = $null
     }
     try {
-        $vc = Get-PrimaryVideoController
+        $vc = $VideoController
+        if (-not $vc) { $vc = Get-PrimaryVideoController }
         if (-not $vc) { return $info }
         $info.Adapter = [string]$vc.Name
         if ($vc.CurrentRefreshRate -and [int]$vc.CurrentRefreshRate -gt 0) {
@@ -62,6 +72,7 @@ function Get-DisplayRefreshInfo {
 }
 
 function Get-GpuDriverInfo {
+    param($VideoController = $null)
     $info = [pscustomobject]@{
         Name        = $null
         Version     = $null
@@ -71,7 +82,8 @@ function Get-GpuDriverInfo {
         VendorOk    = $false
     }
     try {
-        $vc = Get-PrimaryVideoController
+        $vc = $VideoController
+        if (-not $vc) { $vc = Get-PrimaryVideoController }
         if (-not $vc) { return $info }
         $info.Name = [string]$vc.Name
         $info.Version = [string]$vc.DriverVersion
@@ -153,7 +165,7 @@ function Get-OptimizationGrade([int]$Score) {
 function Get-GamingOptimizationScore {
     param([switch]$Refresh)
 
-    if (-not $Refresh -and $Script:OptimizationScoreCache -and (([datetime]::UtcNow - $Script:OptimizationScoreCacheUtc).TotalSeconds -lt 12)) {
+    if (-not $Refresh -and $Script:OptimizationScoreCache -and (([datetime]::UtcNow - $Script:OptimizationScoreCacheUtc).TotalSeconds -lt 30)) {
         return $Script:OptimizationScoreCache
     }
 
@@ -181,7 +193,16 @@ function Get-GamingOptimizationScore {
 
     $disk = $null
     try {
-        if (Get-Command Get-SystemDisk -EA SilentlyContinue) { $disk = Get-SystemDisk }
+        if ($s -and $s.DiskName -and $s.DiskName -ne 'Unknown') {
+            $disk = [pscustomobject]@{
+                FriendlyName = $s.DiskName
+                HealthStatus = $s.DiskHealth
+                MediaType    = $s.DiskMediaType
+            }
+        }
+        if (-not $disk -and (Get-Command Get-SystemDisk -EA SilentlyContinue)) {
+            $disk = Get-SystemDisk
+        }
     } catch { }
 
     $mediaType = $null
@@ -352,7 +373,9 @@ function Get-GamingOptimizationScore {
     $powerHint = ''
     $powerName = $null
     try {
-        if (Get-Command Get-ActivePowerPlanName -EA SilentlyContinue) {
+        if ($s -and $s.PowerPlan) {
+            $powerName = [string]$s.PowerPlan
+        } elseif (Get-Command Get-ActivePowerPlanName -EA SilentlyContinue) {
             $powerName = Get-ActivePowerPlanName
         }
     } catch { }
@@ -399,7 +422,8 @@ function Get-GamingOptimizationScore {
     $drvFix = 'None'
     $drvHint = ''
 
-    $ref = Get-DisplayRefreshInfo
+    $primaryGpu = Get-PrimaryVideoController -Refresh:$Refresh
+    $ref = Get-DisplayRefreshInfo -VideoController $primaryGpu
     if ($null -ne $ref.CurrentHz -and $null -ne $ref.MaxHz) {
         if ($ref.MaxHz -le 60 -or $ref.CurrentHz -ge $ref.MaxHz) {
             $refScore = $refMax
@@ -428,7 +452,7 @@ function Get-GamingOptimizationScore {
         $refDetail = ("Display {0} Hz (max unknown)" -f $ref.CurrentHz)
     }
 
-    $drv = Get-GpuDriverInfo
+    $drv = Get-GpuDriverInfo -VideoController $primaryGpu
     if ($drv.IsBasic) {
         $drvScore = 0
         $drvStatus = 'Bad'
@@ -475,7 +499,7 @@ function Get-GamingOptimizationScore {
     $hagsMax = 15.0
     $gmScore = $gmMax
     $dvrScore = $dvrMax
-    $hagsScore = $hagsMax * 0.5  # neutral if unknown/off
+    $hagsScore = $hagsMax  # optional; unknown/off must not soft-cap tuned PCs
     $gmStatus = 'Unknown'
     $dvrStatus = 'Unknown'
     $hagsStatus = 'Unknown'
@@ -522,17 +546,18 @@ function Get-GamingOptimizationScore {
 
     $hags = Get-HagsEnabled
     if ($null -eq $hags) {
-        $hagsScore = $hagsMax * 0.5
+        $hagsScore = $hagsMax
         $hagsStatus = 'Unknown'
-        $hagsDetail = 'Hardware-accelerated GPU scheduling not reported'
+        $hagsDetail = 'Hardware-accelerated GPU scheduling not reported (optional)'
     } elseif ($hags) {
         $hagsScore = $hagsMax
         $hagsStatus = 'Good'
-        $hagsDetail = 'HAGS: On (soft bonus)'
+        $hagsDetail = 'HAGS: On'
     } else {
-        $hagsScore = $hagsMax * 0.5
+        # Off is a valid choice (driver-dependent). Do not soft-cap a tuned PC at 92.
+        $hagsScore = $hagsMax
         $hagsStatus = 'Good'
-        $hagsDetail = 'HAGS: Off (optional; test per GPU/driver)'
+        $hagsDetail = 'HAGS: Off (optional; enable in Graphics settings if you want to test it)'
     }
 
     [void]$checks.Add((New-OptimizationCheck -Id 'game_mode' -Category 'GamingFeatures' -Status $gmStatus `
@@ -576,16 +601,25 @@ function Get-GamingOptimizationScore {
     $hygMax = 100.0
     $hygScore = $hygMax
     $hygStatus = 'Good'
-    $hygDetail = 'No pending restart'
+    $hygDetail = 'No restart required'
     $reboot = $false
+    $rebootReasons = @()
     try {
-        if ($s -and $null -ne $s.RebootPending) { $reboot = [bool]$s.RebootPending }
-        elseif (Get-Command Test-RebootPending -EA SilentlyContinue) { $reboot = [bool](Test-RebootPending) }
+        if (Get-Command Get-RebootPendingInfo -EA SilentlyContinue) {
+            $ri = Get-RebootPendingInfo -Refresh:$Refresh
+            $reboot = [bool]$ri.Pending
+            $rebootReasons = @($ri.Reasons)
+        } elseif ($s -and $null -ne $s.RebootPending) {
+            $reboot = [bool]$s.RebootPending
+        } elseif (Get-Command Test-RebootPending -EA SilentlyContinue) {
+            $reboot = [bool](Test-RebootPending)
+        }
     } catch { }
     if ($reboot) {
         $hygScore = $hygMax * 0.3
         $hygStatus = 'Warn'
-        $hygDetail = 'Restart pending  -  finish updates/driver installs for a clean session'
+        $why = if ($rebootReasons.Count -gt 0) { ($rebootReasons -join ', ') } else { 'Windows reports a pending restart' }
+        $hygDetail = ("Restart pending ({0})  -  finish updates/driver installs for a clean session" -f $why)
     }
     [void]$checks.Add((New-OptimizationCheck -Id 'reboot_pending' -Category 'Hygiene' -Status $hygStatus `
         -Points $hygScore -Max $hygMax -Title 'Pending restart' -Detail $hygDetail))
@@ -770,10 +804,14 @@ function Open-DisplaySettings {
 
 function Invoke-RecommendedOptimizationFixes {
     param(
-        [switch]$OpenTips
+        [switch]$OpenTips,
+        $BeforeScore = $null
     )
     Write-Step "Recommended optimization fixes"
-    $before = Get-GamingOptimizationScore -Refresh
+    $before = $BeforeScore
+    if (-not $before) {
+        $before = Get-GamingOptimizationScore -Refresh
+    }
 
     $needsGaming = $false
     foreach ($f in @($before.Checks)) {
@@ -785,6 +823,12 @@ function Invoke-RecommendedOptimizationFixes {
 
     if ($needsGaming -and (Get-Command Invoke-GamingOptimize -EA SilentlyContinue)) {
         Invoke-GamingOptimize
+        if (Get-Command Clear-HardwareProbeCaches -EA SilentlyContinue) {
+            Clear-HardwareProbeCaches
+        } else {
+            $Script:OptimizationScoreCache = $null
+            $Script:PowerPlanCache = $null
+        }
     } else {
         Write-Info "No Game Mode / DVR / power-plan auto-fixes needed"
     }

@@ -77,11 +77,16 @@ function Clear-TrackedProcesses {
 
 function Enqueue-UiEvent {
     param([hashtable]$UiEvent)
-    if ($Script:UiShare -and $Script:UiShare.Queue) {
-        $Script:UiShare.Queue.Enqueue($UiEvent)
-        return $true
+    if (-not $Script:UiShare -or -not $Script:UiShare.Queue) { return $false }
+    # Already on the UI thread: let the caller apply immediately (snappier Activity log).
+    $form = Get-UiControl Form
+    if ($form -and -not $form.IsDisposed) {
+        try {
+            if (-not $form.InvokeRequired) { return $false }
+        } catch { }
     }
-    return $false
+    $Script:UiShare.Queue.Enqueue($UiEvent)
+    return $true
 }
 
 $Script:UiModalDepth = 0
@@ -114,6 +119,9 @@ function Show-UiMessageBox {
 
 function Pump-Ui {
     if ([int]$Script:UiModalDepth -gt 0) { return }
+    if (Get-Command Drain-UiEventQueue -EA SilentlyContinue) {
+        try { Drain-UiEventQueue } catch { }
+    }
     $form = Get-UiControl Form
     if ($form -and -not $form.IsDisposed) {
         [System.Windows.Forms.Application]::DoEvents()
@@ -122,9 +130,47 @@ function Pump-Ui {
 
 function Pump-UiThrottled {
     $now = [datetime]::UtcNow
-    if (($now - $Script:LastPumpUtc).TotalMilliseconds -lt 300) { return }
+    if (($now - $Script:LastPumpUtc).TotalMilliseconds -lt 120) { return }
     $Script:LastPumpUtc = $now
     Pump-Ui
+}
+
+function Format-UiByteSize([long]$Bytes) {
+    if ($Bytes -ge 1GB) { return ("{0:N1} GB" -f ($Bytes / 1GB)) }
+    if ($Bytes -ge 1MB) { return ("{0:N0} MB" -f ($Bytes / 1MB)) }
+    if ($Bytes -ge 1KB) { return ("{0:N0} KB" -f ($Bytes / 1KB)) }
+    return ("{0:N0} B" -f $Bytes)
+}
+
+function Update-UiSubProgress {
+    param([double]$Fraction = 0)
+    # Map 0..1 into the current Write-Step slice (e.g. step 2/5 -> 20..40%).
+    if ($Script:TotalSteps -le 0 -or $Script:CurrentStep -le 0) { return }
+    $frac = [math]::Max(0.0, [math]::Min(1.0, $Fraction))
+    $step = [int]$Script:CurrentStep
+    $total = [int]$Script:TotalSteps
+    $base = (($step - 1) / [double]$total) * 100.0
+    $span = (1.0 / [double]$total) * 100.0
+    $pct = [math]::Min(100, [math]::Round($base + ($span * $frac)))
+    Set-UiProgressValue -Value ([int]$pct)
+}
+
+function Update-CleanupLiveStatus {
+    param(
+        [string]$PathLabel,
+        [int]$Files,
+        [long]$Bytes
+    )
+    $plain = ("Cleaning: {0}  |  {1:N0} files  |  {2}" -f $PathLabel, $Files, (Format-UiByteSize $Bytes))
+    Set-UiStatusText -Text $plain
+    if (Get-Command Update-GuiStatusBar -EA SilentlyContinue) {
+        Update-GuiStatusBar -JobText $plain
+    }
+    if ($Files -gt 0) {
+        # Unknown total file count: asymptotic fill within the current step.
+        $soft = [math]::Min(0.92, 1.0 - (1.0 / (1.0 + ($Files / 120.0))))
+        Update-UiSubProgress -Fraction $soft
+    }
 }
 
 function Get-UiControl([string]$Name) {
@@ -153,6 +199,9 @@ function Set-UiStatusText([string]$Text) {
     if (Enqueue-UiEvent @{ Type = 'Status'; Text = $Text }) { return }
     $lbl = Get-UiControl Status
     if ($lbl) { $lbl.Text = $Text }
+    if (Get-Command Set-PageLiveStatus -EA SilentlyContinue) {
+        try { Set-PageLiveStatus -Text $Text } catch { }
+    }
 }
 
 function Invoke-WithUiWait {
@@ -180,6 +229,7 @@ function Invoke-WithUiWait {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $spin = @('|','/','-','\')
     $i = 0
+    $lastHbSec = -15
     try {
         while (-not $handle.IsCompleted) {
             if (Test-CancelRequested) {
@@ -195,9 +245,13 @@ function Invoke-WithUiWait {
             $sec = [int]$sw.Elapsed.TotalSeconds
             $ch = $spin[$i % 4]
             Set-UiStatusText ("[{0}] {1}... {2}s" -f $ch, $Activity, $sec)
+            if (($sec - $lastHbSec) -ge 15) {
+                $lastHbSec = $sec
+                Write-Info ("{0} still running... {1}s (Stop to cancel)" -f $Activity, $sec)
+            }
             Write-Host -NoNewline ("`r  [{0}] {1}... {2}s   " -f $ch, $Activity, $sec) -ForegroundColor DarkYellow
             Pump-Ui
-            Start-Sleep -Milliseconds 200
+            Start-Sleep -Milliseconds 350
             $i++
         }
         Write-Host ""
@@ -361,19 +415,70 @@ function Write-Info([string]$msg) {
 }
 
 function Get-CFreeGB {
+    param([switch]$Refresh)
+    if (-not $Refresh -and $null -ne $Script:CFreeGBCache -and (([datetime]::UtcNow - $Script:CFreeGBCacheUtc).TotalSeconds -lt 8)) {
+        return $Script:CFreeGBCache
+    }
     $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction SilentlyContinue
-    if (-not $d -or $null -eq $d.FreeSpace) { return 0 }
-    return [math]::Round($d.FreeSpace / 1GB, 1)
+    $val = 0
+    if ($d -and $null -ne $d.FreeSpace) {
+        $val = [math]::Round($d.FreeSpace / 1GB, 1)
+    }
+    $Script:CFreeGBCache = $val
+    $Script:CFreeGBCacheUtc = [datetime]::UtcNow
+    return $val
+}
+
+function Get-RebootPendingInfo {
+    param([switch]$Refresh)
+    # Hard signals only. PendingFileRenameOperations is intentionally ignored:
+    # InstallShield, Xbox Gaming Services, and temp uninstallers leave stale
+    # rename entries for months, so almost every gamer PC looks "reboot pending"
+    # forever and Hygiene falsely floors at 30/100.
+    if (-not $Refresh -and $null -ne $Script:RebootPendingInfoCache -and (([datetime]::UtcNow - $Script:RebootPendingInfoCacheUtc).TotalSeconds -lt 10)) {
+        return $Script:RebootPendingInfoCache
+    }
+    $reasons = [System.Collections.Generic.List[string]]::new()
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") {
+        [void]$reasons.Add('Windows Update')
+    }
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") {
+        [void]$reasons.Add('Component Servicing (CBS)')
+    }
+    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Orchestrator\RebootRequired") {
+        [void]$reasons.Add('Update Orchestrator')
+    }
+    $info = [pscustomobject]@{
+        Pending = ($reasons.Count -gt 0)
+        Reasons = [string[]]@($reasons.ToArray())
+    }
+    $Script:RebootPendingInfoCache = $info
+    $Script:RebootPendingInfoCacheUtc = [datetime]::UtcNow
+    return $info
 }
 
 function Test-RebootPending {
-    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") { return $true }
-    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") { return $true }
-    try {
-        $pfr = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name PendingFileRenameOperations -EA SilentlyContinue
-        if ($pfr -and $pfr.PendingFileRenameOperations) { return $true }
-    } catch { }
-    return $false
+    param([switch]$Refresh)
+    return [bool]((Get-RebootPendingInfo -Refresh:$Refresh).Pending)
+}
+
+function Clear-HardwareProbeCaches {
+    $Script:CFreeGBCache = $null
+    $Script:CFreeGBCacheUtc = [datetime]::MinValue
+    $Script:SystemDiskCache = $null
+    $Script:SystemDiskCacheUtc = [datetime]::MinValue
+    $Script:PrimaryVideoCache = $null
+    $Script:PrimaryVideoCacheUtc = [datetime]::MinValue
+    $Script:PowerPlanCache = $null
+    $Script:PowerPlanCacheUtc = [datetime]::MinValue
+    $Script:RebootPendingInfoCache = $null
+    $Script:RebootPendingInfoCacheUtc = [datetime]::MinValue
+    $Script:ProtectedCleanupPathsCache = $null
+    $Script:DeviceSummaryCache = $null
+    $Script:DeviceSummaryCacheUtc = [datetime]::MinValue
+    $Script:OptimizationScoreCache = $null
+    $Script:OptimizationScoreCacheUtc = [datetime]::MinValue
+    $Script:CleanupPreviewCache = $null
 }
 
 function Apply-ModeFlags {
@@ -460,6 +565,9 @@ function New-MaintenanceRestorePoint {
 
 function Get-ProtectedCleanupPaths {
     # Folders that must never be handed to a recursive delete, even by a future caller.
+    if ($null -ne $Script:ProtectedCleanupPathsCache) {
+        return ,$Script:ProtectedCleanupPathsCache
+    }
     $list = [System.Collections.Generic.List[string]]::new()
     $roots = @(
         $env:SystemDrive, $env:SystemRoot, $env:windir, $env:HOMEDRIVE,
@@ -482,7 +590,8 @@ function Get-ProtectedCleanupPaths {
         if ([string]::IsNullOrWhiteSpace($p)) { continue }
         [void]$list.Add((([string]$p).TrimEnd('\', '/')).ToLowerInvariant())
     }
-    return $list
+    $Script:ProtectedCleanupPathsCache = $list
+    return ,$list
 }
 
 function Test-SafeCleanupPath {
@@ -533,29 +642,98 @@ function Remove-OldFilesInPath {
     $cutoff = (Get-Date).AddDays(-$OlderThanDays)
     $freed = 0L
     $n = 0
-    Get-ChildItem -Path $Path -Recurse -Force -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.LastWriteTime -lt $cutoff } |
-        ForEach-Object {
-            if (Test-CancelRequested) { return }
-            try { $freed += $_.Length; Remove-Item $_.FullName -Force -ErrorAction Stop } catch { }
-            $n++
-            if (($n % 80) -eq 0) {
+    $label = Split-Path $Path -Leaf
+    if ([string]::IsNullOrWhiteSpace($label)) { $label = $Path }
+    $lastLogN = 0
+    Update-CleanupLiveStatus -PathLabel $label -Files 0 -Bytes 0
+    Pump-UiThrottled
+
+    # Stream via .NET to avoid Get-ChildItem pipeline + Where-Object overhead on huge trees.
+    $enumFailedEarly = $false
+    try {
+        $rootInfo = [System.IO.DirectoryInfo]::new($Path)
+        foreach ($f in $rootInfo.EnumerateFiles('*', [System.IO.SearchOption]::AllDirectories)) {
+            if (Test-CancelRequested) { break }
+            if ($OlderThanDays -gt 0 -and $f.LastWriteTime -ge $cutoff) { continue }
+            $len = 0L
+            try { $len = [long]$f.Length } catch { }
+            try {
+                # Remove-Item -Force clears ReadOnly; FileInfo.Delete() does not.
+                Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop
+                $freed += $len
+                $n++
+            } catch { }
+            if (($n % 80) -eq 0 -and $n -gt 0) {
                 Assert-NotCancelled
+                Update-CleanupLiveStatus -PathLabel $label -Files $n -Bytes $freed
                 Pump-UiThrottled
             }
+            if (($n - $lastLogN) -ge 250) {
+                $lastLogN = $n
+                Write-Info ("{0}: {1:N0} files, {2} so far..." -f $label, $n, (Format-UiByteSize $freed))
+            }
         }
-    if (Test-CancelRequested) { return $freed }
-    if ($DeleteFoldersToo) {
-        Get-ChildItem -Path $Path -Recurse -Force -Directory -ErrorAction SilentlyContinue |
-            Sort-Object FullName -Descending |
+    } catch {
+        # Only full-fallback when the walk never started (root access denied).
+        if ($n -eq 0 -and $freed -eq 0) { $enumFailedEarly = $true }
+        else { Write-Warn ("{0}: scan interrupted after {1:N0} file(s)" -f $label, $n) }
+    }
+    if ($enumFailedEarly) {
+        Get-ChildItem -Path $Path -Recurse -Force -File -ErrorAction SilentlyContinue |
             ForEach-Object {
                 if (Test-CancelRequested) { return }
+                if ($OlderThanDays -gt 0 -and $_.LastWriteTime -ge $cutoff) { return }
+                $len = 0L
+                try { $len = [long]$_.Length } catch { }
                 try {
-                    if (-not (Get-ChildItem $_.FullName -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
-                        Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
-                    }
+                    Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
+                    $freed += $len
+                    $n++
                 } catch { }
+                if (($n % 80) -eq 0 -and $n -gt 0) {
+                    Assert-NotCancelled
+                    Update-CleanupLiveStatus -PathLabel $label -Files $n -Bytes $freed
+                    Pump-UiThrottled
+                }
             }
+    }
+
+    if ($n -gt 0) {
+        Update-CleanupLiveStatus -PathLabel $label -Files $n -Bytes $freed
+        Pump-UiThrottled
+    }
+    if (Test-CancelRequested) { return $freed }
+    if ($DeleteFoldersToo) {
+        $dirN = 0
+        $dirs = [System.Collections.Generic.List[string]]::new()
+        try {
+            $rootInfo = [System.IO.DirectoryInfo]::new($Path)
+            foreach ($d in $rootInfo.EnumerateDirectories('*', [System.IO.SearchOption]::AllDirectories)) {
+                [void]$dirs.Add($d.FullName)
+            }
+        } catch {
+            Get-ChildItem -Path $Path -Recurse -Force -Directory -ErrorAction SilentlyContinue |
+                ForEach-Object { [void]$dirs.Add($_.FullName) }
+        }
+        # Deepest paths first so parents empty after children are removed.
+        $sorted = @($dirs | Sort-Object { $_.Length } -Descending)
+        foreach ($dirPath in $sorted) {
+            if (Test-CancelRequested) { break }
+            try {
+                $di = [System.IO.DirectoryInfo]::new($dirPath)
+                if ($di.Exists) {
+                    if (($di.Attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+                        $di.Attributes = ($di.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly))
+                    }
+                    # non-recursive: only succeeds when empty (no per-dir listing probe)
+                    [System.IO.Directory]::Delete($dirPath, $false)
+                }
+            } catch {
+                try { Remove-Item -LiteralPath $dirPath -Force -EA SilentlyContinue } catch { }
+            }
+            $dirN++
+            if (($dirN % 60) -eq 0) { Pump-UiThrottled }
+        }
     }
     return $freed
 }
@@ -585,11 +763,14 @@ function Invoke-TempCleanup {
     $i = 0
     foreach ($p in $paths) {
         $i++
-        Write-Info ("[{0}/{1}] {2}" -f $i, $paths.Count, $p)
+        Write-Info ("[{0}/{1}] Scanning {2}" -f $i, $paths.Count, $p)
+        Pump-Ui
         $freed = Remove-OldFilesInPath -Path $p -OlderThanDays $Script:TempOlderThanDays -DeleteFoldersToo
         $total += $freed
-        if ($freed -gt 1MB) {
-            Write-Ok ("{0}: freed {1:N0} MB" -f (Split-Path $p -Leaf), ($freed / 1MB))
+        if ($freed -gt 0) {
+            Write-Ok ("{0}: freed {1}" -f (Split-Path $p -Leaf), (Format-UiByteSize $freed))
+        } else {
+            Write-Info ("{0}: nothing to remove" -f (Split-Path $p -Leaf))
         }
     }
 
@@ -610,12 +791,16 @@ function Invoke-TempCleanup {
                     Stop-Service bits -Force -ErrorAction SilentlyContinue
                     $bitsStopped = $true
                     Start-Sleep -Seconds 2
-                    $before = (Get-ChildItem $do -Recurse -Force -File -EA SilentlyContinue |
-                        Measure-Object Length -Sum -EA SilentlyContinue).Sum
-                    if (-not $before) { $before = 0 }
+                    $freeBefore = Get-CFreeGB -Refresh
                     Get-ChildItem $do -Force -EA SilentlyContinue | Remove-Item -Recurse -Force -EA SilentlyContinue
-                    $total += $before
-                    Write-Ok ("Update download cache: {0:N0} MB" -f ($before / 1MB))
+                    $freeAfter = Get-CFreeGB -Refresh
+                    $approxBytes = [math]::Max(0L, [long](($freeAfter - $freeBefore) * 1GB))
+                    $total += $approxBytes
+                    if ($approxBytes -gt 0) {
+                        Write-Ok ("Update download cache: about {0}" -f (Format-UiByteSize $approxBytes))
+                    } else {
+                        Write-Ok "Update download cache cleared"
+                    }
                 } finally {
                     if ($bitsStopped) { Start-Service bits -EA SilentlyContinue }
                     if ($wuStopped) { Start-Service wuauserv -EA SilentlyContinue }
@@ -708,8 +893,12 @@ function Invoke-BrowserCacheCleanup {
     $total = 0L
     $browserPaths = Get-BrowserCachePaths
 
-    foreach ($browser in $browserPaths.Keys) {
-        Write-Info "Checking $browser..."
+    $browserNames = @($browserPaths.Keys)
+    $bi = 0
+    foreach ($browser in $browserNames) {
+        $bi++
+        Write-Info ("[{0}/{1}] Checking {2}..." -f $bi, $browserNames.Count, $browser)
+        Pump-Ui
         $freedBrowser = 0L
         foreach ($p in $browserPaths[$browser]) {
             if (-not (Test-PathSafe $p)) { continue }
@@ -717,7 +906,9 @@ function Invoke-BrowserCacheCleanup {
         }
         if ($freedBrowser -gt 0) {
             $total += $freedBrowser
-            Write-Ok ("{0}: freed {1:N0} MB" -f $browser, ($freedBrowser / 1MB))
+            Write-Ok ("{0}: freed {1}" -f $browser, (Format-UiByteSize $freedBrowser))
+        } else {
+            Write-Info ("{0}: nothing to remove (or files locked)" -f $browser)
         }
     }
     if ($total -gt 1MB) {
@@ -1345,10 +1536,12 @@ function Invoke-ShaderCacheCleanup {
     )
     foreach ($p in $paths) {
         if (-not (Test-Path $p)) { continue }
+        Write-Info ("Scanning {0}" -f $p)
+        Pump-Ui
         $freed = Remove-OldFilesInPath -Path $p -OlderThanDays 0 -DeleteFoldersToo
         $total += $freed
-        if ($freed -gt 1MB) {
-            Write-Ok ("{0}: freed {1:N0} MB" -f (Split-Path $p -Leaf), ($freed / 1MB))
+        if ($freed -gt 0) {
+            Write-Ok ("{0}: freed {1}" -f (Split-Path $p -Leaf), (Format-UiByteSize $freed))
         }
     }
     if ($total -gt 1MB) {
@@ -1521,14 +1714,23 @@ function Show-RebootRecommendedDialog {
 }
 
 function Get-SystemDisk {
+    param([switch]$Refresh)
+    if (-not $Refresh -and $null -ne $Script:SystemDiskCache -and (([datetime]::UtcNow - $Script:SystemDiskCacheUtc).TotalSeconds -lt 30)) {
+        return $Script:SystemDiskCache
+    }
+    $phys = $null
     try {
         $partition = Get-Partition -DriveLetter C -EA Stop
         $phys = Get-PhysicalDisk -Number $partition.DiskNumber -EA SilentlyContinue
-        if ($phys) { return $phys }
-        return Get-PhysicalDisk | Where-Object { $_.DeviceId -eq $partition.DiskNumber } | Select-Object -First 1
+        if (-not $phys) {
+            $phys = Get-PhysicalDisk | Where-Object { $_.DeviceId -eq $partition.DiskNumber } | Select-Object -First 1
+        }
     } catch {
-        try { return Get-PhysicalDisk | Select-Object -First 1 } catch { return $null }
+        try { $phys = Get-PhysicalDisk | Select-Object -First 1 } catch { $phys = $null }
     }
+    $Script:SystemDiskCache = $phys
+    $Script:SystemDiskCacheUtc = [datetime]::UtcNow
+    return $phys
 }
 
 function Invoke-GamingChecks {
@@ -1629,6 +1831,7 @@ function Invoke-Repair {
         $p = Start-Process -FilePath "DISM.exe" -ArgumentList "/Online","/Cleanup-Image","/RestoreHealth","/LogPath:$dismLog" -PassThru -NoNewWindow
         Register-TrackedProcess $p
         $spin = @('|','/','-','\'); $i = 0
+        $lastHbSec = -15
         while (-not $p.HasExited) {
             if (Test-CancelRequested) {
                 try { $p.Kill() } catch { }
@@ -1638,6 +1841,10 @@ function Invoke-Repair {
             $sec = [int]((Get-Date) - $p.StartTime).TotalSeconds
             Write-Host -NoNewline ("`r  [{0}] DISM running... {1}s   " -f $spin[$i % 4], $sec) -ForegroundColor DarkYellow
             Set-UiStatusText -Text ("[{0}] DISM running... {1}s" -f $spin[$i % 4], $sec)
+            if (($sec - $lastHbSec) -ge 15) {
+                $lastHbSec = $sec
+                Write-Info ("DISM still running... {0}s (Stop to cancel)" -f $sec)
+            }
             Pump-Ui
             Start-Sleep -Milliseconds 400
             $i++
@@ -1664,6 +1871,7 @@ function Invoke-Repair {
         $p = Start-Process -FilePath "sfc.exe" -ArgumentList "/scannow" -PassThru -NoNewWindow
         Register-TrackedProcess $p
         $spin = @('|','/','-','\'); $i = 0
+        $lastHbSec = -15
         while (-not $p.HasExited) {
             if (Test-CancelRequested) {
                 try { $p.Kill() } catch { }
@@ -1673,6 +1881,10 @@ function Invoke-Repair {
             $sec = [int]((Get-Date) - $p.StartTime).TotalSeconds
             Write-Host -NoNewline ("`r  [{0}] SFC running... {1}s   " -f $spin[$i % 4], $sec) -ForegroundColor DarkYellow
             Set-UiStatusText -Text ("[{0}] SFC running... {1}s" -f $spin[$i % 4], $sec)
+            if (($sec - $lastHbSec) -ge 15) {
+                $lastHbSec = $sec
+                Write-Info ("SFC still running... {0}s (Stop to cancel)" -f $sec)
+            }
             Pump-Ui
             Start-Sleep -Milliseconds 400
             $i++
@@ -1692,7 +1904,7 @@ function Invoke-Repair {
 }
 
 function Get-RunSummaryText {
-    $Script:EndFree = Get-CFreeGB
+    $Script:EndFree = Get-CFreeGB -Refresh
     $gained = [math]::Round($Script:EndFree - $Script:StartFree, 1)
     $elapsed = Get-Elapsed
     $lines = @(
@@ -1713,7 +1925,7 @@ function Invoke-MaintenanceRun {
     $Script:Report.Clear()
     $Script:RunStart = Get-Date
     Build-StepPlan
-    $Script:StartFree = Get-CFreeGB
+    $Script:StartFree = Get-CFreeGB -Refresh
 
     Write-Info "C: free space before: $($Script:StartFree) GB"
     Write-Info ("Plan: " + ($Script:StepNames -join " > "))
