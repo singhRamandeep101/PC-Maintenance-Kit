@@ -40,17 +40,24 @@ function Test-Sha256File {
     return $actual
 }
 
+function Select-KitZip($Assets) {
+    $zips = @($Assets | Where-Object { $_.name -match '\.zip$' -and $_.name -notmatch '\.sha256' -and $_.browser_download_url })
+    $named = @($zips | Where-Object { $_.name -like 'PC-Maintenance-Kit-v*.zip' })
+    if ($named.Count -gt 0) { return $named[0] }
+    return ($zips | Select-Object -First 1)
+}
+
 function Get-ReleaseDownload {
     $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers $Headers
-    $zip = @($rel.assets) |
-        Where-Object { $_.name -match '\.zip$' -and $_.name -notmatch '\.sha256' -and $_.browser_download_url } |
-        Select-Object -First 1
+    $zip = Select-KitZip @($rel.assets)
     if (-not $zip) { return $null }
 
     $expected = $null
-    $sumAsset = @($rel.assets) |
-        Where-Object { $_.name -match '\.sha256$' -and $_.browser_download_url } |
-        Select-Object -First 1
+    $wantSum = [string]$zip.name + '.sha256'
+    $sumAsset = @($rel.assets | Where-Object { $_.name -eq $wantSum -and $_.browser_download_url } | Select-Object -First 1)
+    if (-not $sumAsset) {
+        $sumAsset = @($rel.assets | Where-Object { $_.name -match '\.sha256$' -and $_.browser_download_url } | Select-Object -First 1)
+    }
     if ($sumAsset) {
         try {
             $sumPath = Join-Path $Work 'expected.sha256'
@@ -79,12 +86,37 @@ function Unblock-Tree([string]$Path) {
 }
 
 function Assert-ScriptsSafe([string]$Folder) {
+    # Unsigned is allowed. A signature that exists must be Valid.
     Get-ChildItem -LiteralPath $Folder -Recurse -Filter *.ps1 -File -EA SilentlyContinue | ForEach-Object {
         $sig = Get-AuthenticodeSignature -FilePath $_.FullName
-        if ($sig.Status -eq 'HashMismatch') {
-            throw ("Rejected {0}: file was signed but has been modified" -f $_.Name)
+        $status = [string]$sig.Status
+        if ($status -eq 'NotSigned') { return }
+        if ($status -ne 'Valid') {
+            throw ("Rejected {0}: Authenticode status is {1}" -f $_.Name, $status)
         }
     }
+}
+
+function Resolve-PayloadRoot([string]$Extract) {
+    foreach ($cand in @(Get-ChildItem -LiteralPath $Extract -Recurse -Filter 'PC-Maintenance.ps1' -File -EA SilentlyContinue)) {
+        $root = Split-Path -Parent $cand.FullName
+        if (Test-Path -LiteralPath (Join-Path $root 'lib\Core.ps1')) { return $root }
+    }
+    return $null
+}
+
+function Test-PayloadHealthy([string]$Root) {
+    $entry = Join-Path $Root 'PC-Maintenance.ps1'
+    $core = Join-Path $Root 'lib\Core.ps1'
+    if (-not (Test-Path -LiteralPath $entry)) { return $false }
+    if (-not (Test-Path -LiteralPath $core)) { return $false }
+    foreach ($f in @($entry, $core)) {
+        $errs = $null
+        $toks = $null
+        [void][System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$toks, [ref]$errs)
+        if ($errs -and $errs.Count -gt 0) { return $false }
+    }
+    return $true
 }
 
 Write-Host ""
@@ -121,35 +153,51 @@ try {
     $extract = Join-Path $Work 'extract'
     Expand-Archive -LiteralPath $zipPath -DestinationPath $extract -Force
     Unblock-Tree $extract
-    $payload = Get-ChildItem -LiteralPath $extract -Recurse -Filter 'PC-Maintenance.ps1' -File -EA SilentlyContinue |
-        Select-Object -First 1
-    if (-not $payload) { throw "Download did not contain PC-Maintenance.ps1." }
-    $source = Split-Path -Parent $payload.FullName
+    $source = Resolve-PayloadRoot $extract
+    if (-not $source) { throw "Download did not contain PC-Maintenance.ps1 next to lib\Core.ps1." }
     Assert-ScriptsSafe $source
+    if (-not (Test-PayloadHealthy $source)) { throw "Download failed its health check." }
 
     if (-not (Test-Path -LiteralPath $Dest)) {
         New-Item -ItemType Directory -Path $Dest -Force | Out-Null
     }
 
     $rc = Join-Path $env:SystemRoot 'System32\robocopy.exe'
-    & $rc $source $Dest /E /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP /XD .git tests dist docs .github | Out-Null
-    if ($LASTEXITCODE -ge 8) { throw "Could not copy files (robocopy $LASTEXITCODE)." }
+    $backup = Join-Path $env:LOCALAPPDATA 'PC-Maintenance-Kit-backup'
+    $hadInstall = Test-Path -LiteralPath (Join-Path $Dest 'PC-Maintenance.ps1')
+    if ($hadInstall) {
+        if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force -EA SilentlyContinue }
+        New-Item -ItemType Directory -Path $backup -Force | Out-Null
+        & $rc $Dest $backup /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+        if ($LASTEXITCODE -ge 8) { throw "Could not back up the current install (robocopy $LASTEXITCODE)." }
+    }
+    try {
+        & $rc $source $Dest /E /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP /XD .git tests dist .github | Out-Null
+        if ($LASTEXITCODE -ge 8) { throw "Could not copy files (robocopy $LASTEXITCODE)." }
 
-    # Drop scripts removed from newer releases (robocopy /E does not delete extras)
-    foreach ($rel in @('', 'lib')) {
-        $srcDir = if ($rel) { Join-Path $source $rel } else { $source }
-        $dstDir = if ($rel) { Join-Path $Dest $rel } else { $Dest }
-        if (-not (Test-Path -LiteralPath $srcDir)) { continue }
-        if (-not (Test-Path -LiteralPath $dstDir)) { continue }
-        Get-ChildItem -LiteralPath $dstDir -File -Filter '*.ps1' -EA SilentlyContinue | ForEach-Object {
-            $peer = Join-Path $srcDir $_.Name
-            if (-not (Test-Path -LiteralPath $peer)) {
-                Remove-Item -LiteralPath $_.FullName -Force -EA SilentlyContinue
+        # Drop scripts removed from newer releases (robocopy /E does not delete extras)
+        foreach ($rel in @('', 'lib')) {
+            $srcDir = if ($rel) { Join-Path $source $rel } else { $source }
+            $dstDir = if ($rel) { Join-Path $Dest $rel } else { $Dest }
+            if (-not (Test-Path -LiteralPath $srcDir)) { continue }
+            if (-not (Test-Path -LiteralPath $dstDir)) { continue }
+            Get-ChildItem -LiteralPath $dstDir -File -Filter '*.ps1' -EA SilentlyContinue | ForEach-Object {
+                $peer = Join-Path $srcDir $_.Name
+                if (-not (Test-Path -LiteralPath $peer)) {
+                    Remove-Item -LiteralPath $_.FullName -Force -EA SilentlyContinue
+                }
             }
         }
-    }
 
-    Unblock-Tree $Dest
+        Unblock-Tree $Dest
+        if (-not (Test-PayloadHealthy $Dest)) { throw "Installed copy failed its health check." }
+    } catch {
+        if ($hadInstall -and (Test-Path -LiteralPath (Join-Path $backup 'PC-Maintenance.ps1'))) {
+            Write-Host "  Install failed. Restoring the previous copy..." -ForegroundColor Yellow
+            & $rc $backup $Dest /E /IS /IT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+        }
+        throw
+    }
 
     $startBat = Join-Path $Dest 'Start.bat'
     $scriptPs1 = Join-Path $Dest 'PC-Maintenance.ps1'

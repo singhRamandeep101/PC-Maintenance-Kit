@@ -184,36 +184,8 @@ function Apply-GuiSettings {
 function Get-FolderSizeBytes {
     param([string]$Path, [int]$OlderThanDays = 0)
     if (-not (Test-PathSafe $Path)) { return 0L }
-    $cutoff = (Get-Date).AddDays(-$OlderThanDays)
-    $sum = 0L
-    $n = 0
-    try {
-        $rootInfo = [System.IO.DirectoryInfo]::new($Path)
-        foreach ($f in $rootInfo.EnumerateFiles('*', [System.IO.SearchOption]::AllDirectories)) {
-            if ((Get-Command Test-CancelRequested -EA SilentlyContinue) -and (Test-CancelRequested)) { break }
-            if ($OlderThanDays -gt 0 -and $f.LastWriteTime -ge $cutoff) { continue }
-            $sum += $f.Length
-            $n++
-            if (($n % 80) -eq 0) {
-                if (Get-Command Update-CleanupLiveStatus -EA SilentlyContinue) {
-                    $label = Split-Path $Path -Leaf
-                    Update-CleanupLiveStatus -PathLabel ("Preview {0}" -f $label) -Files $n -Bytes $sum
-                }
-                Pump-UiThrottled
-            }
-        }
-    } catch {
-        try {
-            $items = Get-ChildItem -LiteralPath $Path -Recurse -Force -File -EA SilentlyContinue
-            foreach ($f in $items) {
-                if ($OlderThanDays -gt 0 -and $f.LastWriteTime -ge $cutoff) { continue }
-                $sum += $f.Length
-                $n++
-                if (($n % 80) -eq 0) { Pump-UiThrottled }
-            }
-        } catch { }
-    }
-    return $sum
+    if (-not (Get-Command Measure-ContainedTreeBytes -EA SilentlyContinue)) { return 0L }
+    return [long](Measure-ContainedTreeBytes -Root $Path -OlderThanDays $OlderThanDays)
 }
 
 function Get-EpicCachePaths {
@@ -222,7 +194,6 @@ function Get-EpicCachePaths {
         "$env:LOCALAPPDATA\EpicGamesLauncher\Saved\webcache",
         "$env:LOCALAPPDATA\EpicGamesLauncher\Saved\webcache_4430",
         "$env:LOCALAPPDATA\EpicGamesLauncher\Saved\Logs",
-        "$env:LOCALAPPDATA\EpicGamesLauncher\Saved\Data",
         "$env:PROGRAMDATA\Epic\EpicGamesLauncher\Data\EMS"
     )) {
         if (Test-PathSafe $p) { [void]$list.Add($p) }
@@ -248,14 +219,17 @@ function Get-CleanupPreview {
     $rows = [System.Collections.Generic.List[object]]::new()
     $total = 0L
 
-    $tempPaths = @(
+    $tempRaw = @(
         $env:TEMP,
         "$env:LOCALAPPDATA\Temp",
-        "C:\Windows\Temp",
+        $(if (Get-Command Get-WindowsTempPath -EA SilentlyContinue) { Get-WindowsTempPath } else { 'C:\Windows\Temp' }),
         "$env:LOCALAPPDATA\CrashDumps",
         "$env:LOCALAPPDATA\Microsoft\Windows\INetCache",
         "$env:LOCALAPPDATA\Microsoft\Windows\WebCache"
     )
+    $tempPaths = if (Get-Command Select-UniqueCleanupPaths -EA SilentlyContinue) {
+        @(Select-UniqueCleanupPaths -Paths $tempRaw)
+    } else { $tempRaw }
     foreach ($p in $tempPaths) {
         if (-not (Test-PathSafe $p)) { continue }
         Write-Info ("Measuring {0}" -f $p)
@@ -349,7 +323,7 @@ function Get-CleanupPreview {
     }
 
     if ($WuCache) {
-        $wuPath = "C:\Windows\SoftwareDistribution\Download"
+        $wuPath = if (Get-Command Get-WindowsUpdateDownloadPath -EA SilentlyContinue) { Get-WindowsUpdateDownloadPath } else { 'C:\Windows\SoftwareDistribution\Download' }
         if (Test-PathSafe $wuPath) {
             $bytes = Get-FolderSizeBytes $wuPath 0
             $total += $bytes
@@ -476,6 +450,69 @@ function Get-ExpectedSha256Text {
     return $null
 }
 
+function Select-KitReleaseZip {
+    param($Assets)
+    $zips = @($Assets | Where-Object {
+        $_.name -and ($_.name -match '\.zip$') -and ($_.name -notmatch '\.sha256') -and $_.browser_download_url
+    })
+    $named = @($zips | Where-Object { $_.name -like 'PC-Maintenance-Kit-v*.zip' })
+    if ($named.Count -gt 0) { return $named[0] }
+    return ($zips | Select-Object -First 1)
+}
+
+function Select-KitReleaseChecksum {
+    param($Assets, [string]$ZipName)
+    $sums = @($Assets | Where-Object { $_.name -and ($_.name -match '\.sha256$') -and $_.browser_download_url })
+    if ($ZipName) {
+        $match = @($sums | Where-Object { $_.name -eq ($ZipName + '.sha256') } | Select-Object -First 1)
+        if ($match) { return $match[0] }
+    }
+    return ($sums | Select-Object -First 1)
+}
+
+function Resolve-KitPayloadRoot {
+    param([string]$Extract)
+    if ([string]::IsNullOrWhiteSpace($Extract) -or -not (Test-Path -LiteralPath $Extract)) { return $null }
+    foreach ($cand in @(Get-ChildItem -LiteralPath $Extract -Recurse -Filter 'PC-Maintenance.ps1' -File -EA SilentlyContinue)) {
+        $root = Split-Path -Parent $cand.FullName
+        if (Test-Path -LiteralPath (Join-Path $root 'lib\Core.ps1')) { return $root }
+    }
+    return $null
+}
+
+function Assert-KitScriptsAuthenticode {
+    # Unsigned scripts are allowed (signing is optional). A signature that is
+    # present must be Valid — HashMismatch, NotTrusted, and UnknownError are rejected.
+    param([string]$Folder)
+    Get-ChildItem -LiteralPath $Folder -Recurse -Filter *.ps1 -File -EA SilentlyContinue | ForEach-Object {
+        $sig = Get-AuthenticodeSignature -FilePath $_.FullName
+        $status = [string]$sig.Status
+        if ($status -eq 'NotSigned') { return }
+        if ($status -ne 'Valid') {
+            throw ("Rejected {0}: Authenticode status is {1}" -f $_.Name, $status)
+        }
+    }
+}
+
+function Test-KitPayloadHealthy {
+    param([string]$Root)
+    try {
+        $entry = Join-Path $Root 'PC-Maintenance.ps1'
+        $core = Join-Path $Root 'lib\Core.ps1'
+        if (-not (Test-Path -LiteralPath $entry)) { return $false }
+        if (-not (Test-Path -LiteralPath $core)) { return $false }
+        foreach ($f in @($entry, $core)) {
+            $errs = $null
+            $toks = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$toks, [ref]$errs)
+            if ($errs -and $errs.Count -gt 0) { return $false }
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Get-GitHubLatestRelease {
     param([string]$Repo = $Script:GitHubRepo)
     try {
@@ -489,12 +526,8 @@ function Get-GitHubLatestRelease {
         try {
             $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
             $json = $reader.ReadToEnd() | ConvertFrom-Json
-            $zipAsset = @($json.assets) |
-                Where-Object { $_.name -and ($_.name -match '\.zip$') -and ($_.name -notmatch '\.sha256') -and $_.browser_download_url } |
-                Select-Object -First 1
-            $sumAsset = @($json.assets) |
-                Where-Object { $_.name -and ($_.name -match '\.sha256$') -and $_.browser_download_url } |
-                Select-Object -First 1
+            $zipAsset = Select-KitReleaseZip -Assets @($json.assets)
+            $sumAsset = Select-KitReleaseChecksum -Assets @($json.assets) -ZipName $(if ($zipAsset) { [string]$zipAsset.name } else { '' })
             $digest = $null
             if ($zipAsset -and $zipAsset.digest) {
                 $digest = Get-ExpectedSha256Text ([string]$zipAsset.digest)
@@ -533,7 +566,9 @@ function Compare-AppVersion {
     param([string]$Current, [string]$Other)
     $c = ConvertTo-ComparableVersion $Current
     $o = ConvertTo-ComparableVersion $Other
-    if ($null -eq $c -or $null -eq $o) { return 0 }
+    # $null means "cannot compare". Callers must not treat that as equal —
+    # in PowerShell `$null -lt 0` is true, which would look like an update.
+    if ($null -eq $c -or $null -eq $o) { return $null }
     return $c.CompareTo($o)
 }
 
@@ -550,6 +585,15 @@ function Test-AppUpdateAvailable {
         }
     }
     $cmp = Compare-AppVersion -Current $Script:AppVersion -Other $rel.Latest
+    if ($null -eq $cmp) {
+        if (-not $Silent) {
+            Write-Info "Update check: release version could not be compared"
+        }
+        return [pscustomobject]@{
+            Status  = 'Unavailable'
+            Release = $rel
+        }
+    }
     if ($cmp -lt 0) {
         return [pscustomobject]@{
             Status  = 'UpdateAvailable'
@@ -663,19 +707,13 @@ function Invoke-AppSelfUpdate {
     Pump-Ui
     Expand-Archive -LiteralPath $zipPath -DestinationPath $extract -Force
 
-    $payloadPs1 = Get-ChildItem -LiteralPath $extract -Recurse -Filter "PC-Maintenance.ps1" -File -EA SilentlyContinue |
-        Select-Object -First 1
-    if (-not $payloadPs1) {
-        throw "Update ZIP is missing PC-Maintenance.ps1"
+    $payloadRoot = Resolve-KitPayloadRoot -Extract $extract
+    if (-not $payloadRoot) {
+        throw "Update ZIP is missing PC-Maintenance.ps1 next to lib\Core.ps1"
     }
-    $payloadRoot = Split-Path -Parent $payloadPs1.FullName
-
-    # Reject silently-tampered signed scripts if any are Authenticode-signed
-    Get-ChildItem -LiteralPath $payloadRoot -Recurse -Filter *.ps1 -File -EA SilentlyContinue | ForEach-Object {
-        $sig = Get-AuthenticodeSignature -FilePath $_.FullName
-        if ($sig.Status -eq 'HashMismatch') {
-            throw ("Rejected {0}: file was signed but has been modified" -f $_.Name)
-        }
+    Assert-KitScriptsAuthenticode -Folder $payloadRoot
+    if (-not (Test-KitPayloadHealthy -Root $payloadRoot)) {
+        throw "Update payload failed its health check"
     }
 
     $applyPs1 = Join-Path $work "Apply-Update.ps1"

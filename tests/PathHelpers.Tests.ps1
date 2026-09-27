@@ -29,6 +29,8 @@ Assert-True ($null -eq (Join-PathSafe $null 'a')) 'Join-PathSafe null base -> nu
 Assert-True ($null -eq (Join-PathSafe '' 'a')) 'Join-PathSafe empty base -> null'
 $joined = Join-PathSafe 'C:\Steam' 'steamapps\downloading'
 Assert-True ($joined -eq 'C:\Steam\steamapps\downloading' -or $joined -eq 'C:\Steam/steamapps/downloading') 'Join-PathSafe combines'
+$driveJoined = Join-PathSafe ($env:SystemDrive.TrimEnd('\')) 'Users'
+Assert-True ($driveJoined -eq (($env:SystemDrive.TrimEnd('\')) + '\Users')) 'Join-PathSafe bare drive is not drive-relative'
 
 Assert-True (-not (Test-PathSafe $null)) 'Test-PathSafe null -> false'
 Assert-True (-not (Test-PathSafe '')) 'Test-PathSafe empty -> false'
@@ -84,6 +86,12 @@ Assert-True (Test-SafeCleanupPath (Join-Path $env:SystemRoot 'Temp')) 'Safe: C:\
 Assert-True (Test-SafeCleanupPath (Join-Path $env:LOCALAPPDATA 'Temp')) 'Safe: LocalAppData\Temp'
 Assert-True (Test-SafeCleanupPath (Join-Path $env:LOCALAPPDATA 'D3DSCache')) 'Safe: shader cache'
 Assert-True (Test-SafeCleanupPath '\\server\share\cache') 'Safe: UNC folder below share root'
+Assert-True (-not (Test-SafeCleanupPath (Join-Path $env:SystemRoot 'System32\drivers'))) 'Unsafe: under System32'
+Assert-True (-not (Test-SafeCleanupPath (Join-Path $env:USERPROFILE 'Documents\Games'))) 'Unsafe: under Documents'
+Assert-True (-not (Test-SafeCleanupPath (Join-Path $env:SystemRoot 'Logs'))) 'Unsafe: other Windows folder'
+Assert-True (Test-SafeCleanupPath (Get-WindowsUpdateDownloadPath)) 'Safe: WU download cache'
+$otherUser = Join-Path (Join-Path $env:SystemDrive '\Users') 'pcmk-not-me\Desktop'
+Assert-True (-not (Test-SafeCleanupPath $otherUser)) 'Unsafe: another user profile'
 
 # The guard must actually be wired into the delete primitive
 Assert-True ((Remove-OldFilesInPath -Path '' -OlderThanDays 0) -eq 0) 'Remove-OldFilesInPath refuses empty path'
@@ -117,6 +125,57 @@ $roFreed = Remove-OldFilesInPath -Path $roRoot -OlderThanDays 0 -DeleteFoldersTo
 Assert-True (-not (Test-Path -LiteralPath $roFile)) 'Cleanup deletes read-only files'
 Assert-True ($roFreed -gt 0) 'Cleanup reports bytes for read-only deletes'
 Remove-Item -LiteralPath $roRoot -Recurse -Force -EA SilentlyContinue
+
+$measureRoot = Join-Path $env:TEMP ('pcmk-measure-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$measureOut = Join-Path $env:TEMP ('pcmk-measure-out-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Path $measureRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $measureOut -Force | Out-Null
+$measureOld = Join-Path $measureRoot 'old.bin'
+$measureNew = Join-Path $measureRoot 'new.bin'
+$measureSecret = Join-Path $measureOut 'secret.bin'
+[System.IO.File]::WriteAllBytes($measureOld, (New-Object byte[] 100))
+[System.IO.File]::WriteAllBytes($measureNew, (New-Object byte[] 40))
+[System.IO.File]::WriteAllBytes($measureSecret, (New-Object byte[] 20))
+(Get-Item -LiteralPath $measureOld).LastWriteTime = (Get-Date).AddDays(-10)
+$measureAll = Measure-ContainedTreeBytes -Root $measureRoot -OlderThanDays 0
+$measureAged = Measure-ContainedTreeBytes -Root $measureRoot -OlderThanDays 2
+Assert-True ($measureAll -eq 140) 'Preview size counts every file in the folder'
+Assert-True ($measureAged -eq 100) 'Preview size skips files newer than the cutoff'
+$measureLink = Join-Path $measureRoot 'link'
+cmd /c "mklink /J `"$measureLink`" `"$measureOut`"" | Out-Null
+if (Test-Path -LiteralPath (Join-Path $measureLink 'secret.bin')) {
+    $measureLinked = Measure-ContainedTreeBytes -Root $measureRoot -OlderThanDays 0
+    Assert-True ($measureLinked -eq 140) 'Preview size does not follow a junction'
+    cmd /c "rmdir `"$measureLink`"" | Out-Null
+} else {
+    Assert-True $false 'Could not create a junction for the preview size test'
+}
+Remove-Item -LiteralPath $measureRoot -Recurse -Force -EA SilentlyContinue
+Remove-Item -LiteralPath $measureOut -Recurse -Force -EA SilentlyContinue
+
+# A junction inside an approved folder must not let the delete escape
+$jRoot = Join-Path $env:TEMP ('pcmk-junc-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$outside = Join-Path $env:TEMP ('pcmk-secret-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Path $jRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $outside -Force | Out-Null
+$secret = Join-Path $outside 'secret.txt'
+Set-Content -LiteralPath $secret -Value 'keep' -Encoding ASCII
+$inside = Join-Path $jRoot 'inside.txt'
+Set-Content -LiteralPath $inside -Value 'gone' -Encoding ASCII
+$link = Join-Path $jRoot 'link'
+cmd /c "mklink /J `"$link`" `"$outside`"" | Out-Null
+$secretViaLink = Join-Path $link 'secret.txt'
+if (Test-Path -LiteralPath $secretViaLink) {
+    $null = Remove-OldFilesInPath -Path $jRoot -OlderThanDays 0 -DeleteFoldersToo
+    Assert-True (Test-Path -LiteralPath $secret) 'Cleanup does not follow a junction out of the root'
+    Assert-True (-not (Test-Path -LiteralPath $inside)) 'Cleanup still deletes real files beside a junction'
+    Assert-True (Test-Path -LiteralPath $link) 'Cleanup leaves the junction itself in place'
+} else {
+    Assert-True $false 'Could not create a junction for the containment test'
+}
+cmd /c "rmdir `"$link`"" | Out-Null
+Remove-Item -LiteralPath $jRoot -Recurse -Force -EA SilentlyContinue
+Remove-Item -LiteralPath $outside -Recurse -Force -EA SilentlyContinue
 
 $settings = Get-DefaultGuiSettings
 Assert-True ($settings.HomeWU -eq $false) 'Default HomeWU is false'
@@ -195,7 +254,17 @@ Assert-True ((Compare-AppVersion -Current '5.2.4' -Other '5.2.4') -eq 0) 'Compar
 Assert-True ((Compare-AppVersion -Current '5.3.0' -Other 'v5.3.0') -eq 0) 'Compare-AppVersion ignores leading v'
 Assert-True ((Compare-AppVersion -Current '5.3.0' -Other 'v5.3.0-rc1') -eq 0) 'Compare-AppVersion ignores prerelease suffix'
 Assert-True ((Compare-AppVersion -Current '5.3.1' -Other 'v5.3.0-rc1') -gt 0) 'Compare-AppVersion compares numeric core only'
-Assert-True ((Compare-AppVersion -Current '5.3.0' -Other 'not-a-version') -eq 0) 'Compare-AppVersion is inert on garbage input'
+Assert-True ($null -eq (Compare-AppVersion -Current '5.3.0' -Other 'not-a-version')) 'Compare-AppVersion returns null on garbage input'
+$kitZip = Select-KitReleaseZip -Assets @(
+    [pscustomobject]@{ name = 'notes.zip'; browser_download_url = 'https://example.invalid/notes.zip' }
+    [pscustomobject]@{ name = 'PC-Maintenance-Kit-v9.9.9.zip'; browser_download_url = 'https://example.invalid/kit.zip' }
+)
+Assert-True ($kitZip.name -eq 'PC-Maintenance-Kit-v9.9.9.zip') 'Release picker prefers the kit zip'
+$kitSum = Select-KitReleaseChecksum -Assets @(
+    [pscustomobject]@{ name = 'other.zip.sha256'; browser_download_url = 'https://example.invalid/other' }
+    [pscustomobject]@{ name = 'PC-Maintenance-Kit-v9.9.9.zip.sha256'; browser_download_url = 'https://example.invalid/kit' }
+) -ZipName 'PC-Maintenance-Kit-v9.9.9.zip'
+Assert-True ($kitSum.name -eq 'PC-Maintenance-Kit-v9.9.9.zip.sha256') 'Checksum picker matches the kit zip name'
 $extrasRaw = Get-Content -LiteralPath (Join-Path $Root 'lib\Extras.ps1') -Raw
 Assert-True ($extrasRaw -match "NewerThanRelease") 'Update check has NewerThanRelease status'
 Assert-True ($null -ne (Get-Command Get-ExpectedSha256Text -EA SilentlyContinue)) 'Get-ExpectedSha256Text exists'
@@ -231,6 +300,18 @@ $discordRaw3 = Get-Content -LiteralPath $discordProbe -Raw
 Assert-True (([regex]::Matches($discordRaw3, '"hardwareAcceleration"\s*:')).Count -eq 1) 'Discord null value replaced without duplicate'
 Assert-True ($discordRaw3 -match '"hardwareAcceleration"\s*:\s*true') 'Discord null value flipped to true'
 Remove-Item -LiteralPath $discordProbe -Force -EA SilentlyContinue
+
+$planProbe = Join-Path $env:TEMP ('pcmk-plan-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.txt')
+function Get-PreviousPowerPlanPath { $planProbe }
+Save-PreviousPowerPlan -Guid '11111111-1111-1111-1111-111111111111'
+Save-PreviousPowerPlan -Guid '22222222-2222-2222-2222-222222222222'
+$savedPlan = (Get-Content -LiteralPath $planProbe -Raw).Trim()
+Assert-True ($savedPlan -eq '11111111-1111-1111-1111-111111111111') 'Previous power plan is saved once and not overwritten'
+Remove-Item -LiteralPath $planProbe -Force -EA SilentlyContinue
+function Get-PreviousPowerPlanPath {
+    $dir = Join-Path $env:LOCALAPPDATA 'PC-Maintenance-Kit'
+    return (Join-Path $dir 'previous-power-plan.txt')
+}
 
 # ---- Settings round-trip (redirected away from the real profile) ----
 $settingsProbe = Join-Path $env:TEMP ('pcmk-settings-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.json')
@@ -363,11 +444,31 @@ Assert-True ($null -ne (Get-Command Clear-HardwareProbeCaches -EA SilentlyContin
 $free1 = Get-CFreeGB
 $free2 = Get-CFreeGB
 Assert-True ($free1 -eq $free2) 'Get-CFreeGB cache returns stable value'
+$cap = Get-SystemDriveCapacityGB
+$cap2 = Get-SystemDriveCapacityGB
+Assert-True ($null -eq $cap -or $cap -gt 0) 'Drive capacity comes from the shared C: read'
+Assert-True ($cap -eq $cap2) 'Drive capacity cache is stable'
+$uniqueTemps = @(Select-UniqueCleanupPaths -Paths @($env:TEMP, "$env:LOCALAPPDATA\Temp", $env:TEMP))
+$uniqueKeys = @($uniqueTemps | ForEach-Object { [string]$_.ToLowerInvariant() } | Select-Object -Unique)
+Assert-True ($uniqueKeys.Count -eq @($uniqueTemps).Count) 'Cleanup path list drops duplicate folders'
+$tempFull = ''
+$localTemp = ''
+try { $tempFull = [System.IO.Path]::GetFullPath($env:TEMP).TrimEnd('\').ToLowerInvariant() } catch { }
+try { $localTemp = [System.IO.Path]::GetFullPath("$env:LOCALAPPDATA\Temp").TrimEnd('\').ToLowerInvariant() } catch { }
+if ($tempFull -and $tempFull -eq $localTemp) {
+    Assert-True (@($uniqueKeys | Where-Object { $_ -eq $tempFull }).Count -eq 1) 'TEMP and LocalAppData Temp are measured once'
+}
 $prot1 = Get-ProtectedCleanupPaths
 $prot2 = Get-ProtectedCleanupPaths
 Assert-True ([object]::ReferenceEquals($prot1, $prot2)) 'Get-ProtectedCleanupPaths caches the protected list'
 
 . (Join-Path $Root 'lib\Score.ps1')
+$ssdScore = Get-DiskMediaScore -MediaType 'SSD' -FriendlyName 'Disk' -MaxPoints 40
+$unspecScore = Get-DiskMediaScore -MediaType 'Unspecified' -FriendlyName 'Disk' -MaxPoints 40
+$hddScore = Get-DiskMediaScore -MediaType 'HDD' -FriendlyName 'Disk' -MaxPoints 40
+Assert-True ($ssdScore.Status -eq 'Good' -and $ssdScore.Points -eq 40) 'SSD media scores full points'
+Assert-True ($unspecScore.Status -eq 'Unknown' -and $unspecScore.Points -eq 0) 'Unspecified media does not score as an SSD'
+Assert-True ($hddScore.Status -eq 'Bad' -and $hddScore.Points -eq 0) 'HDD media scores zero'
 $scoreErr = $null
 $optScore = $null
 try {
@@ -457,9 +558,45 @@ Assert-True ($getRaw -match 'Refusing to install without integrity') 'Get.ps1 fa
 Assert-True ($getRaw -notmatch 'refs/heads/main\.zip') 'Get.ps1 no longer falls back to main.zip'
 Assert-True ($getRaw -match 'Could not fetch GitHub release info') 'Get.ps1 surfaces network/API errors'
 Assert-True ($getRaw -match 'zip\.digest') 'Get.ps1 can fall back to asset digest'
+Assert-True ($getRaw -match 'PC-Maintenance-Kit-v') 'Get.ps1 prefers the named kit zip'
+Assert-True ($getRaw -match 'Test-PayloadHealthy') 'Get.ps1 health-checks the payload'
+Assert-True ($getRaw -match 'Authenticode status') 'Get.ps1 requires a present signature to be Valid'
+Assert-True ($getRaw -match 'PC-Maintenance-Kit-backup') 'Get.ps1 backs up an existing install'
 $coreRaw = Get-Content -LiteralPath (Join-Path $Root 'lib\Core.ps1') -Raw
 Assert-True ($coreRaw -match 'upgrade --all --source winget --silent') 'Core.ps1 uses fast bulk winget upgrade'
+Assert-True ($coreRaw -match 'upgrade --id \$id --exact --source winget --silent') 'Core.ps1 direct-upgrades explicit-targeting packages silently'
+Assert-True ($coreRaw -match 'function ConvertFrom-WingetUpgradeList') 'Core.ps1 splits winget list sections'
+Assert-True ($coreRaw -match 'MSFT_Partition') 'System disk is read without the Storage module first'
 Assert-True ($coreRaw -match 'pin add --id') 'Core.ps1 pins skip-list before bulk upgrade'
+Assert-True ($coreRaw -notmatch 'function Invoke-WingetPerIdUpgrade') 'Core.ps1 does not upgrade winget packages one by one'
+
+$wingetSample = @"
+No newer package versions are available from the configured sources.
+Name                             Id                          Version     Available   Source
+-------------------------------------------------------------------------------------------
+Unity Hub                        Unity.UnityHub              3.4.1       3.8.0       winget
+1 package(s) have version numbers that cannot be determined.
+Name                             Id                          Version
+--------------------------------------------------------------------
+Roblox Player                    Roblox.Roblox               Unknown
+The following packages require explicit targeting for upgrade:
+Name                             Id                          Version     Available   Source
+-------------------------------------------------------------------------------------------
+Unity Editor 2022.3.62f1         Unity.Unity.2022            2022.3.20   2022.3.62   winget
+2 upgrades available.
+"@
+$wingetParsed = ConvertFrom-WingetUpgradeList -Text $wingetSample
+Assert-True (@($wingetParsed.Bulk) -contains 'Unity.UnityHub') 'Bulk section keeps Unity Hub'
+Assert-True (@($wingetParsed.Explicit) -contains 'Unity.Unity.2022') 'Explicit section keeps the Unity editor'
+Assert-True (@($wingetParsed.Unknown) -contains 'Roblox.Roblox') 'Unknown-version section keeps Roblox'
+Assert-True (@($wingetParsed.Bulk) -notcontains 'Unity.Unity.2022') 'Explicit id is not treated as a bulk upgrade'
+Assert-True ((Get-WingetUpgradeOutcome -Text 'Successfully upgraded' -ExitCode 0) -eq 'Upgraded') 'Direct upgrade success is Upgraded'
+Assert-True ((Get-WingetUpgradeOutcome -Text 'Installer failed with exit code 1' -ExitCode 1) -eq 'Failed') 'Direct upgrade failure is Failed'
+Assert-True ((Get-WingetUpgradeOutcome -Text 'This package does not support silent install' -ExitCode 0) -eq 'NeedsInteraction') 'Silent-unsupported installer is NeedsInteraction'
+Assert-True ((ConvertTo-DiskHealthName 0) -eq 'Healthy') 'Disk health 0 is Healthy'
+Assert-True ((ConvertTo-DiskMediaName 4) -eq 'SSD') 'Disk media 4 is SSD'
+Assert-True ((ConvertTo-DiskMediaName 0) -eq 'Unspecified') 'Disk media 0 is Unspecified'
+Assert-True ((ConvertTo-DiskMediaName 'SSD') -eq 'SSD') 'Disk media name SSD stays SSD'
 Assert-True ($coreRaw -match 'pin remove --id') 'Core.ps1 removes temporary pins after bulk upgrade'
 Assert-True ($coreRaw -match 'Invoke-WithUiModal') 'Core.ps1 has Invoke-WithUiModal'
 Assert-True ($coreRaw -match 'Show-RebootRecommendedDialog') 'Core.ps1 has the reboot dialog'
@@ -477,8 +614,17 @@ Assert-True ($guiRaw -match 'FormClosing') 'Gui blocks close while busy'
 Assert-True ($guiRaw -match 'Checking for updates') 'Startup update check runs under GuiBusy'
 Assert-True ($guiRaw -match 'Clear-HardwareProbeCaches|Invoke-GuiPanelsRefresh') 'Gui refreshes panels through a shared orchestrator'
 Assert-True ($guiRaw -match 'Resolve-GuiRefreshMode') 'Gui chooses refresh mode by action'
+Assert-True ($guiRaw -match "return 'Space'") 'Cleanup and updates refresh free space without a hardware rescan'
+$deviceRaw = Get-Content -LiteralPath (Join-Path $Root 'lib\Device.ps1') -Raw
+Assert-True ($deviceRaw -notmatch 'Get-Volume') 'Device summary does not import the Storage module via Get-Volume'
+Assert-True ($deviceRaw -notmatch 'Get-Partition') 'Device summary does not call Get-Partition'
+$scoreRaw = Get-Content -LiteralPath (Join-Path $Root 'lib\Score.ps1') -Raw
+Assert-True ($scoreRaw -notmatch 'Get-Volume') 'Drive capacity does not call Get-Volume'
 Assert-True ($coreRaw -match 'function Clear-HardwareProbeCaches') 'Core exposes Clear-HardwareProbeCaches'
 Assert-True ($coreRaw -match 'EnumerateFiles') 'Cleanup streams files via EnumerateFiles'
+Assert-True ($coreRaw -match 'Invoke-ContainedTreeWalk') 'Cleanup walks without following reparse points'
+Assert-True ($coreRaw -notmatch 'looksClean') 'DISM success is not inferred from the log'
+Assert-True ($coreRaw -match 'left as-is') 'Stopped update services are left alone outside an update run'
 Assert-True ($guiRaw -match 'CleanupPreviewCache') 'Gui caches recent cleanup previews'
 Assert-True ($guiRaw -match 'add_ThreadException') 'Gui installs an unhandled-exception perimeter'
 # Restart must never fire from a DoEvents-delivered click during a job
@@ -509,18 +655,28 @@ $pmRaw = Get-Content -LiteralPath (Join-Path $Root 'PC-Maintenance.ps1') -Raw
 Assert-True ($pmRaw -match "ValidateSet\([^\)]*'Scheduled'") 'Entry script accepts -Mode Scheduled'
 Assert-True ($pmRaw -match 'lib\\Care\.ps1') 'Entry script loads Care.ps1'
 Assert-True ($pmRaw -match 'Apply-ScheduledCareFlags') 'Scheduled mode applies care flags'
+Assert-True ($pmRaw -match 'HeadlessRun') 'Scheduled mode is marked headless'
 
 $guiRaw2 = Get-Content -LiteralPath (Join-Path $Root 'lib\Gui.ps1') -Raw
 Assert-True ($guiRaw2 -match 'Enable-GuiDpiAwareness') 'GUI enables DPI awareness'
 Assert-True ($guiRaw2 -match 'AutoScaleMode]::Dpi') 'Form uses DPI autoscaling'
+Assert-True ($guiRaw2 -match 'DeviceDpi') 'Minimum window size follows DPI'
+Assert-True ($guiRaw2 -match 'UseVisualStyleBackColor = \$false') 'Checkboxes paint on the panel instead of the system background'
+Assert-True ($guiRaw2 -match 'FromArgb\(186, 198, 214\)') 'Muted text is light enough to read on the cards'
+Assert-True ($coreRaw -match 'FromArgb\(176, 190, 208\)') 'Log gray is light enough to read on the dark log'
 Assert-True ($guiRaw2 -match 'GuiPages\.ps1') 'GUI loads GuiPages module'
 Assert-True ($guiRaw2 -match 'BtnPresetGamer') 'GUI wires care presets'
+Assert-True ($guiRaw2 -match 'Unknown option. Nothing was run') 'CLI rejects an unknown menu choice'
+Assert-True ($guiRaw2 -match 'BtnRestorePower') 'GUI can restore the previous power plan'
+Assert-True ($extrasRaw -notmatch 'EpicGamesLauncher\\Saved\\Data') 'Epic cleanup does not wipe Saved\Data'
 
 $pagesRaw = Get-Content -LiteralPath (Join-Path $Root 'lib\GuiPages.ps1') -Raw
 Assert-True ($pagesRaw -match 'function Add-GuiHomePage') 'GuiPages has Home builder'
 Assert-True ($pagesRaw -match 'function Add-GuiGamingPage') 'GuiPages has Gaming builder'
 Assert-True ($pagesRaw -match 'ChkScheduleWeekly') 'Home page has schedule checkbox'
 Assert-True ($pagesRaw -match 'GetNewClosure') 'GuiPages Resize handlers capture locals with GetNewClosure'
+Assert-True ($pagesRaw -notmatch 'Anchor = "Top,Left,Right"') 'Pages do not anchor controls that a resize handler also sizes'
+Assert-True ($pagesRaw -notmatch '\[math\]::Max\(200,') 'Resize does not force a control wider than its card'
 
 $buildRaw = Get-Content -LiteralPath (Join-Path $Root 'Build-Release.ps1') -Raw
 Assert-True ($buildRaw -match 'Get-FileHash') 'Build-Release.ps1 hashes ZIP'

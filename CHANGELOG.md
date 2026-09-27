@@ -1,5 +1,42 @@
 # Changelog
 
+## 5.4.0
+
+Cleanup stays inside the folder it was given, scheduled runs no longer hang on dialogs, and the score stops awarding points for probes that failed.
+
+**Safety**
+
+- Recursive deletes walk the tree themselves and skip junctions and symlinks, so a link inside Temp or a cache folder cannot pull the delete outside that folder
+- The Windows Update download-cache wipe uses that same walk instead of `Remove-Item -Recurse`
+- `Test-SafeCleanupPath` now refuses children of Documents, Desktop, other user profiles, and everything under Windows except `Temp` and `SoftwareDistribution\Download`
+- Epic cleanup no longer wipes `Saved\Data` (launcher state, not a cache)
+- Installer and self-update prefer the `PC-Maintenance-Kit-v*.zip` asset, require `PC-Maintenance.ps1` beside `lib\Core.ps1`, and reject a script whose Authenticode signature is present but not `Valid`
+- `Get.ps1` backs up the current install and restores it if the copy or health check fails
+- A scheduled run writes `scheduled-last-run.log` and does not show message boxes. winget still runs only when that checkbox was saved on
+- Cleanup-only runs no longer start Windows Update or BITS if you stopped them
+- DISM and SFC count as success only when the exit code is 0
+- An unrecognized CLI menu choice does nothing
+
+**Fixes**
+
+- Ultimate Performance is created once. The plan you left is saved, and Gaming has **Restore previous power plan**
+- Optimization score gives storage, memory, power, and display zero points when those probes fail. `Unspecified` disk media is no longer scored as an SSD
+- winget bulk upgrades report install failures instead of a clean success
+- winget no longer falls back to upgrading one app at a time. One silent `upgrade --all` covers the normal list, so installer windows are not opened in a queue
+- Packages winget marks as needing explicit targeting (Unity editors and the same class of app) are upgraded silently one id at a time and each result is written to the log. If an installer has no silent mode, the kit says so and does not open a window
+- Apps whose installed version winget cannot determine are named and left alone
+- Panel refresh after cleanup or updates no longer reloads CPU, GPU, and disk. Those probes stay cached, and disk info is read without importing the Storage module
+- The window uses one slate palette with light body text, so labels, checkboxes, the log, and disabled buttons stay readable
+- Resizing no longer clips text or stacks controls. Cards are not cut to a rounded region, and the minimum size grows with display scaling
+- The window is a left-hand nav and scrolling pages. Labels wrap inside the column, buttons wrap onto the next line, and the activity log can be hidden so it does not cover the page
+- Page text is stacked from each label's real height, so wrapped lines no longer paint over the next row. Icon glyphs sit in circles instead of sharp squares
+- Pages keep the title at the top. The activity-log links sit to the right of the title, and long gaming status values stay on their own side of the row
+- Startup reads C: and the GPU list once and reuses them for free space, drive size, and the score. Cleanup preview no longer measures the same temp folder twice
+- Home shows Fix my PC, the options, and the presets before the hardware cards. Cleanup preview counts sizes without a script call per file and updates the status while a folder is still being measured
+- Stop during a cleanup preview now ends the size walk, including the rest of the current folder. Startup and Refresh lock the window while they read hardware, so another action cannot start in the middle of that scan
+- Update check treats an unparseable remote version as unavailable, not "up to date"
+- Windows temp and the update download cache use `%SystemRoot%` instead of a hardcoded `C:\Windows`
+
 ## 5.3.0
 
 Gaming Optimization Score, plus a safety and release-engineering pass.

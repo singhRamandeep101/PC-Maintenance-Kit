@@ -29,21 +29,32 @@ function New-OptimizationCheck {
     }
 }
 
+function Get-VideoControllers {
+    param([switch]$Refresh)
+    # Device summary and the score both need this list. One CIM query fills both.
+    if (-not $Refresh -and $null -ne $Script:VideoControllerCache -and (([datetime]::UtcNow - $Script:VideoControllerCache.Utc).TotalSeconds -lt 600)) {
+        return @($Script:VideoControllerCache.Items | Where-Object { $_ })
+    }
+    $list = New-Object System.Collections.Generic.List[object]
+    try {
+        $found = @(Get-CimInstance Win32_VideoController -EA SilentlyContinue |
+            Where-Object { $_.Name -and $_.Name -notmatch 'Basic|Remote|Microsoft Basic' } |
+            Sort-Object { if ($_.AdapterRAM -gt 0) { -$_.AdapterRAM } else { 0 } })
+        foreach ($g in $found) { if ($g) { [void]$list.Add($g) } }
+    } catch { }
+    $Script:VideoControllerCache = @{ Items = $list.ToArray(); Utc = [datetime]::UtcNow }
+    return @($Script:VideoControllerCache.Items)
+}
+
 function Get-PrimaryVideoController {
     param([switch]$Refresh)
-    if (-not $Refresh -and $null -ne $Script:PrimaryVideoCache -and (([datetime]::UtcNow - $Script:PrimaryVideoCacheUtc).TotalSeconds -lt 30)) {
+    $gpus = @(Get-VideoControllers -Refresh:$Refresh)
+    if ($gpus.Count -gt 0) { return $gpus[0] }
+    if (-not $Refresh -and $null -ne $Script:PrimaryVideoCache -and (([datetime]::UtcNow - $Script:PrimaryVideoCacheUtc).TotalSeconds -lt 600)) {
         return $Script:PrimaryVideoCache
     }
     $vc = $null
-    try {
-        $gpus = @(Get-CimInstance Win32_VideoController -EA SilentlyContinue |
-            Where-Object { $_.Name -and $_.Name -notmatch 'Basic|Remote|Microsoft Basic' } |
-            Sort-Object { if ($_.AdapterRAM -gt 0) { -$_.AdapterRAM } else { 0 } })
-        if ($gpus.Count) { $vc = $gpus[0] }
-        else { $vc = Get-CimInstance Win32_VideoController -EA SilentlyContinue | Select-Object -First 1 }
-    } catch {
-        $vc = $null
-    }
+    try { $vc = Get-CimInstance Win32_VideoController -EA SilentlyContinue | Select-Object -First 1 } catch { $vc = $null }
     $Script:PrimaryVideoCache = $vc
     $Script:PrimaryVideoCacheUtc = [datetime]::UtcNow
     return $vc
@@ -139,22 +150,6 @@ function Get-HagsEnabled {
     }
 }
 
-function Get-SystemDriveCapacityGB {
-    try {
-        $vol = Get-Volume -DriveLetter C -EA SilentlyContinue
-        if ($vol -and $vol.Size -gt 0) {
-            return [math]::Round($vol.Size / 1GB, 1)
-        }
-    } catch { }
-    try {
-        $logical = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -EA SilentlyContinue
-        if ($logical -and $logical.Size -gt 0) {
-            return [math]::Round($logical.Size / 1GB, 1)
-        }
-    } catch { }
-    return $null
-}
-
 function Get-OptimizationGrade([int]$Score) {
     if ($Score -ge 85) { return 'Excellent' }
     if ($Score -ge 70) { return 'Good' }
@@ -162,24 +157,68 @@ function Get-OptimizationGrade([int]$Score) {
     return 'Critical'
 }
 
+function Get-DiskMediaScore {
+    param(
+        [string]$MediaType,
+        [string]$FriendlyName,
+        [double]$MaxPoints = 40
+    )
+    $name = if ([string]::IsNullOrWhiteSpace($FriendlyName)) { 'disk' } else { $FriendlyName }
+    if ($MediaType -match 'SSD') {
+        return [pscustomobject]@{
+            Points = $MaxPoints
+            Status = 'Good'
+            Detail = "System disk: $name ($MediaType)"
+            Hint   = ''
+        }
+    }
+    if ($MediaType -match 'HDD') {
+        return [pscustomobject]@{
+            Points = 0
+            Status = 'Bad'
+            Detail = "System disk is HDD ($name)  -  slow loads and stutter risk"
+            Hint   = 'Move Windows/games to an SSD when you can'
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($MediaType) -or $MediaType -match 'Unspecified') {
+        return [pscustomobject]@{
+            Points = 0
+            Status = 'Unknown'
+            Detail = "System disk media type not reported ($name)"
+            Hint   = ''
+        }
+    }
+    return [pscustomobject]@{
+        Points = ($MaxPoints * 0.6)
+        Status = 'Warn'
+        Detail = "System disk media: $MediaType"
+        Hint   = ''
+    }
+}
+
 function Get-GamingOptimizationScore {
     param([switch]$Refresh)
 
-    if (-not $Refresh -and $Script:OptimizationScoreCache -and (([datetime]::UtcNow - $Script:OptimizationScoreCacheUtc).TotalSeconds -lt 30)) {
+    if (-not $Refresh -and $Script:OptimizationScoreCache -and (([datetime]::UtcNow - $Script:OptimizationScoreCacheUtc).TotalSeconds -lt 600)) {
         return $Script:OptimizationScoreCache
     }
 
     $checks = New-Object System.Collections.Generic.List[object]
     $s = $null
-    try { $s = Get-DeviceSummary -Refresh:$Refresh } catch { }
+    $summaryOk = $false
+    try {
+        $s = Get-DeviceSummary -Refresh:$Refresh
+        $summaryOk = $true
+    } catch { }
 
     # ---- Storage (weight 0.22) ----
     $mediaPts = 40.0
     $freePts = 40.0
     $healthPts = 20.0
-    $mediaScore = $mediaPts
-    $freeScore = $freePts
-    $healthScore = $healthPts
+    # Unknown probes start at zero. A failed disk read must not look like a healthy SSD.
+    $mediaScore = 0.0
+    $freeScore = 0.0
+    $healthScore = 0.0
     $mediaStatus = 'Unknown'
     $freeStatus = 'Unknown'
     $healthStatus = 'Unknown'
@@ -209,20 +248,11 @@ function Get-GamingOptimizationScore {
     if ($disk) {
         $mediaType = [string]$disk.MediaType
         $healthStr = [string]$disk.HealthStatus
-        if ($mediaType -match 'SSD|Unspecified') {
-            $mediaScore = $mediaPts
-            $mediaStatus = 'Good'
-            $mediaDetail = "System disk: $($disk.FriendlyName) ($mediaType)"
-        } elseif ($mediaType -match 'HDD') {
-            $mediaScore = 0
-            $mediaStatus = 'Bad'
-            $mediaDetail = "System disk is HDD ($($disk.FriendlyName))  -  slow loads and stutter risk"
-            $mediaHint = 'Move Windows/games to an SSD when you can'
-        } else {
-            $mediaScore = $mediaPts * 0.6
-            $mediaStatus = 'Warn'
-            $mediaDetail = "System disk media: $mediaType"
-        }
+        $mediaJudged = Get-DiskMediaScore -MediaType $mediaType -FriendlyName $disk.FriendlyName -MaxPoints $mediaPts
+        $mediaScore = $mediaJudged.Points
+        $mediaStatus = $mediaJudged.Status
+        $mediaDetail = $mediaJudged.Detail
+        if ($mediaJudged.Hint) { $mediaHint = $mediaJudged.Hint }
 
         if ($healthStr -match 'Healthy') {
             $healthScore = $healthPts
@@ -237,9 +267,9 @@ function Get-GamingOptimizationScore {
             $healthStatus = 'Bad'
             $healthDetail = "Disk health: $healthStr  -  back up and replace soon"
         } else {
-            $healthScore = $healthPts
+            $healthScore = 0
             $healthStatus = 'Unknown'
-            $healthDetail = "Disk health: $healthStr"
+            $healthDetail = if ([string]::IsNullOrWhiteSpace($healthStr)) { 'Could not read disk health' } else { "Disk health: $healthStr" }
         }
     }
 
@@ -294,8 +324,8 @@ function Get-GamingOptimizationScore {
     # ---- Memory (weight 0.20) ----
     $memCapMax = 50.0
     $memChMax = 50.0
-    $capScore = $memCapMax
-    $chScore = $memChMax
+    $capScore = 0.0
+    $chScore = 0.0
     $capStatus = 'Unknown'
     $chStatus = 'Unknown'
     $capDetail = 'RAM capacity unknown'
@@ -353,7 +383,7 @@ function Get-GamingOptimizationScore {
         $chFix = 'CopyRamTip'
         $chHint = 'Add a matching second stick for dual-channel'
     } else {
-        $chScore = $memChMax
+        $chScore = 0
         $chStatus = 'Unknown'
         $chDetail = 'Could not determine RAM channel config'
     }
@@ -366,7 +396,7 @@ function Get-GamingOptimizationScore {
 
     # ---- Power (weight 0.18) ----
     $powerMax = 100.0
-    $powerScore = $powerMax
+    $powerScore = 0.0
     $powerStatus = 'Unknown'
     $powerDetail = 'Power plan unknown'
     $powerFix = 'None'
@@ -379,7 +409,7 @@ function Get-GamingOptimizationScore {
             $powerName = Get-ActivePowerPlanName
         }
     } catch { }
-    if ($powerName) {
+    if ($powerName -and $powerName -ne 'Unknown') {
         if ($powerName -match 'Ultimate|High performance|High Performance') {
             $powerScore = $powerMax
             $powerStatus = 'Good'
@@ -411,8 +441,8 @@ function Get-GamingOptimizationScore {
     # ---- DisplayGpu (weight 0.15) ----
     $refMax = 55.0
     $drvMax = 45.0
-    $refScore = $refMax
-    $drvScore = $drvMax
+    $refScore = 0.0
+    $drvScore = 0.0
     $refStatus = 'Unknown'
     $drvStatus = 'Unknown'
     $refDetail = 'Refresh rate unknown'
@@ -422,7 +452,8 @@ function Get-GamingOptimizationScore {
     $drvFix = 'None'
     $drvHint = ''
 
-    $primaryGpu = Get-PrimaryVideoController -Refresh:$Refresh
+    # Device summary already refreshed the shared GPU list when this score refresh did.
+    $primaryGpu = Get-PrimaryVideoController -Refresh:((-not $summaryOk) -and [bool]$Refresh)
     $ref = Get-DisplayRefreshInfo -VideoController $primaryGpu
     if ($null -ne $ref.CurrentHz -and $null -ne $ref.MaxHz) {
         if ($ref.MaxHz -le 60 -or $ref.CurrentHz -ge $ref.MaxHz) {

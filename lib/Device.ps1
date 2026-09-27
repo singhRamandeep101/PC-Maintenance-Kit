@@ -49,7 +49,7 @@ function Open-StorageSettings {
 
 function Get-DeviceSummary {
     param([switch]$Refresh)
-    if (-not $Refresh -and $Script:DeviceSummaryCache -and (([datetime]::UtcNow - $Script:DeviceSummaryCacheUtc).TotalSeconds -lt 30)) {
+    if (-not $Refresh -and $Script:DeviceSummaryCache -and (([datetime]::UtcNow - $Script:DeviceSummaryCacheUtc).TotalSeconds -lt 600)) {
         return $Script:DeviceSummaryCache
     }
 
@@ -59,8 +59,14 @@ function Get-DeviceSummary {
     if (-not $cpu) { $cpu = "Unknown CPU" }
     if (Get-Command Pump-Ui -EA SilentlyContinue) { Pump-Ui }
 
-    $gpus = @(Get-CimInstance Win32_VideoController -EA SilentlyContinue | Where-Object { $_.Name -and $_.Name -notmatch 'Basic|Remote|Microsoft' } | Select-Object -ExpandProperty Name -Unique)
-    $gpu = if ($gpus.Count) { $gpus -join " | " } else { "Unknown GPU" }
+    $gpu = "Unknown GPU"
+    if (Get-Command Get-VideoControllers -EA SilentlyContinue) {
+        $gpus = @(Get-VideoControllers -Refresh:$Refresh | ForEach-Object { [string]$_.Name } | Where-Object { $_ } | Select-Object -Unique)
+        if ($gpus.Count) { $gpu = $gpus -join " | " }
+    } else {
+        $gpus = @(Get-CimInstance Win32_VideoController -EA SilentlyContinue | Where-Object { $_.Name -and $_.Name -notmatch 'Basic|Remote|Microsoft Basic' } | Select-Object -ExpandProperty Name -Unique)
+        if ($gpus.Count) { $gpu = $gpus -join " | " }
+    }
     if (Get-Command Pump-Ui -EA SilentlyContinue) { Pump-Ui }
 
     $sticks = @(Get-CimInstance Win32_PhysicalMemory -EA SilentlyContinue)
@@ -86,23 +92,18 @@ function Get-DeviceSummary {
         if (Get-Command Get-SystemDisk -EA SilentlyContinue) {
             $media = Get-SystemDisk -Refresh:$Refresh
         }
-        if (-not $media) {
-            $partition = Get-Partition -DriveLetter C -EA SilentlyContinue
-            if ($partition) {
-                $media = Get-PhysicalDisk -Number $partition.DiskNumber -EA SilentlyContinue
-            }
-        }
-        if (-not $media) { $media = Get-PhysicalDisk | Select-Object -First 1 }
         if ($media) {
             $diskName = $media.FriendlyName
             $diskHealth = [string]$media.HealthStatus
         }
     } catch { }
 
+    $free = Get-CFreeGB -Refresh:$Refresh
     $trim = "Unknown"
     try {
-        $vol = Get-Volume -DriveLetter C -EA SilentlyContinue
-        if ($vol -and $vol.FileSystemType -eq 'NTFS') {
+        # Free space just read C:. Reuse that object for the file system.
+        $logical = Get-SystemLogicalDisk
+        if ($logical -and [string]$logical.FileSystem -eq 'NTFS') {
             if ($media -and $media.MediaType -match 'SSD|Unspecified') {
                 $trim = "SSD detected (TRIM supported on modern Windows)"
             } elseif ($media -and $media.MediaType -match 'HDD') {
@@ -113,7 +114,6 @@ function Get-DeviceSummary {
         }
     } catch { }
 
-    $free = Get-CFreeGB -Refresh:$Refresh
     $power = Get-ActivePowerPlanName -Refresh:$Refresh
     $reboot = Test-RebootPending -Refresh:$Refresh
 

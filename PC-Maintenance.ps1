@@ -43,7 +43,9 @@ try {
             Show-CliMenu
         }
         'Scheduled' {
-            # Headless weekly care: uses saved Home checkbox prefs (or Gamer defaults)
+            # Headless weekly care: uses saved Home checkbox prefs (or Gamer defaults).
+            # No message boxes — a hidden task would sit on them until the 4-hour limit.
+            $Script:HeadlessRun = $true
             Apply-ScheduledCareFlags
             [void](Invoke-MaintenanceRun)
         }

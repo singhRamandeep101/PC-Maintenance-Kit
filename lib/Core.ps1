@@ -11,6 +11,7 @@ $Script:DoAmd = $false
 $Script:DoShaderCleanup = $true
 $Script:DoGamingOptimize = $true
 $Script:DoWuCacheWipe = $false
+$Script:HeadlessRun = $false
 $Script:TotalSteps = 0
 $Script:CurrentStep = 0
 $Script:RunStart = Get-Date
@@ -361,8 +362,8 @@ function Get-UiLogColor {
         'Yellow' { return [System.Drawing.Color]::FromArgb(251, 191, 36) }
         'Red'    { return [System.Drawing.Color]::FromArgb(251, 113, 133) }
         'Cyan'   { return [System.Drawing.Color]::FromArgb(34, 211, 238) }
-        'Gray'   { return [System.Drawing.Color]::FromArgb(120, 140, 175) }
-        default  { return [System.Drawing.Color]::FromArgb(210, 222, 240) }
+        'Gray'   { return [System.Drawing.Color]::FromArgb(176, 190, 208) }
+        default  { return [System.Drawing.Color]::FromArgb(244, 247, 251) }
     }
 }
 
@@ -414,12 +415,29 @@ function Write-Info([string]$msg) {
     Append-UiLog "  ... $msg" "Gray"
 }
 
+function Get-SystemLogicalDisk {
+    param([switch]$Refresh)
+    # One C: read feeds free space, capacity, and the file system. Free space is
+    # allowed to go stale after 8 seconds; capacity is kept from that same read.
+    if (-not $Refresh -and $null -ne $Script:LogicalDiskCache -and (([datetime]::UtcNow - $Script:LogicalDiskCacheUtc).TotalSeconds -lt 8)) {
+        return $Script:LogicalDiskCache
+    }
+    $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction SilentlyContinue
+    $Script:LogicalDiskCache = $d
+    $Script:LogicalDiskCacheUtc = [datetime]::UtcNow
+    if ($d -and $d.Size -gt 0) {
+        $Script:DriveCapacityGbCache = [math]::Round(([double]$d.Size) / 1GB, 1)
+        $Script:DriveCapacityGbCacheUtc = [datetime]::UtcNow
+    }
+    return $d
+}
+
 function Get-CFreeGB {
     param([switch]$Refresh)
     if (-not $Refresh -and $null -ne $Script:CFreeGBCache -and (([datetime]::UtcNow - $Script:CFreeGBCacheUtc).TotalSeconds -lt 8)) {
         return $Script:CFreeGBCache
     }
-    $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction SilentlyContinue
+    $d = Get-SystemLogicalDisk -Refresh:$Refresh
     $val = 0
     if ($d -and $null -ne $d.FreeSpace) {
         $val = [math]::Round($d.FreeSpace / 1GB, 1)
@@ -427,6 +445,36 @@ function Get-CFreeGB {
     $Script:CFreeGBCache = $val
     $Script:CFreeGBCacheUtc = [datetime]::UtcNow
     return $val
+}
+
+function Get-SystemDriveCapacityGB {
+    param([switch]$Refresh)
+    if (-not $Refresh -and $null -ne $Script:DriveCapacityGbCache -and (([datetime]::UtcNow - $Script:DriveCapacityGbCacheUtc).TotalSeconds -lt 600)) {
+        return $Script:DriveCapacityGbCache
+    }
+    $d = Get-SystemLogicalDisk -Refresh:$Refresh
+    if ($d -and $d.Size -gt 0) {
+        return $Script:DriveCapacityGbCache
+    }
+    return $null
+}
+
+function Select-UniqueCleanupPaths {
+    # %TEMP% and LocalAppData\Temp are often the same folder. Walk it once.
+    param([string[]]$Paths)
+    $out = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    foreach ($p in $Paths) {
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        $full = $null
+        try { $full = [System.IO.Path]::GetFullPath($p).TrimEnd('\') } catch { continue }
+        $key = $full.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        if (-not (Test-PathSafe $full)) { continue }
+        $seen[$key] = $true
+        [void]$out.Add($full)
+    }
+    return @($out.ToArray())
 }
 
 function Get-RebootPendingInfo {
@@ -465,6 +513,11 @@ function Test-RebootPending {
 function Clear-HardwareProbeCaches {
     $Script:CFreeGBCache = $null
     $Script:CFreeGBCacheUtc = [datetime]::MinValue
+    $Script:LogicalDiskCache = $null
+    $Script:LogicalDiskCacheUtc = [datetime]::MinValue
+    $Script:DriveCapacityGbCache = $null
+    $Script:DriveCapacityGbCacheUtc = [datetime]::MinValue
+    $Script:VideoControllerCache = $null
     $Script:SystemDiskCache = $null
     $Script:SystemDiskCacheUtc = [datetime]::MinValue
     $Script:PrimaryVideoCache = $null
@@ -594,6 +647,170 @@ function Get-ProtectedCleanupPaths {
     return ,$list
 }
 
+function Get-WindowsTempPath {
+    if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+        return (Join-Path $env:SystemRoot 'Temp')
+    }
+    return 'C:\Windows\Temp'
+}
+
+function Get-WindowsUpdateDownloadPath {
+    if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+        return (Join-Path $env:SystemRoot 'SoftwareDistribution\Download')
+    }
+    return 'C:\Windows\SoftwareDistribution\Download'
+}
+
+function Test-NormalizedPathUnder {
+    param([string]$ChildKey, [string]$ParentPath)
+    if ([string]::IsNullOrWhiteSpace($ChildKey) -or [string]::IsNullOrWhiteSpace($ParentPath)) { return $false }
+    $parentFull = $null
+    try { $parentFull = [System.IO.Path]::GetFullPath($ParentPath) } catch { return $false }
+    if ([string]::IsNullOrWhiteSpace($parentFull)) { return $false }
+    $parentKey = $parentFull.TrimEnd('\', '/').ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($parentKey)) { return $false }
+    if ($ChildKey -eq $parentKey) { return $true }
+    return $ChildKey.StartsWith($parentKey + '\')
+}
+
+function Test-FileReparsePoint {
+    param($Info)
+    if ($null -eq $Info) { return $true }
+    try {
+        return (($Info.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+    } catch {
+        return $true
+    }
+}
+
+function Test-CleanupPathContained {
+    # True only when Candidate is strictly inside Root. Prefix match uses a trailing
+    # separator so C:\temp does not contain C:\temp-other.
+    param([string]$RootFull, [string]$CandidateFull)
+    if ([string]::IsNullOrWhiteSpace($RootFull) -or [string]::IsNullOrWhiteSpace($CandidateFull)) { return $false }
+    $root = $RootFull.TrimEnd('\', '/')
+    $cand = $CandidateFull.TrimEnd('\', '/')
+    if ($cand.Length -le $root.Length) { return $false }
+    $prefix = $root + '\'
+    return $cand.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Invoke-ContainedTreeWalk {
+    # Walks $Root without following directory junctions or symlinks. File reparse
+    # points are skipped too. Returns how many reparse points were left untouched.
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [scriptblock]$OnFile,
+        [scriptblock]$OnDirectory
+    )
+    $skipped = 0
+    $rootFull = $null
+    try { $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\') } catch { return 0 }
+    $rootInfo = $null
+    try { $rootInfo = [System.IO.DirectoryInfo]::new($rootFull) } catch { return 0 }
+    if (-not $rootInfo.Exists) { return 0 }
+
+    $stack = New-Object 'System.Collections.Generic.Stack[string]'
+    $stack.Push($rootFull)
+    while ($stack.Count -gt 0) {
+        if (Test-CancelRequested) { break }
+        $current = [string]$stack.Pop()
+        $currentTrim = $current.TrimEnd('\')
+        if (($currentTrim -ne $rootFull) -and -not (Test-CleanupPathContained -RootFull $rootFull -CandidateFull $currentTrim)) {
+            continue
+        }
+        $di = $null
+        try { $di = [System.IO.DirectoryInfo]::new($currentTrim) } catch { continue }
+        if (-not $di.Exists) { continue }
+        if (($currentTrim -ne $rootFull) -and (Test-FileReparsePoint $di)) {
+            $skipped++
+            continue
+        }
+
+        try {
+            foreach ($f in $di.EnumerateFiles()) {
+                if (Test-FileReparsePoint $f) { $skipped++; continue }
+                if (-not (Test-CleanupPathContained -RootFull $rootFull -CandidateFull $f.FullName)) { continue }
+                if ($OnFile) { & $OnFile $f }
+            }
+        } catch { }
+
+        try {
+            foreach ($sub in $di.EnumerateDirectories()) {
+                if (Test-FileReparsePoint $sub) { $skipped++; continue }
+                if (-not (Test-CleanupPathContained -RootFull $rootFull -CandidateFull $sub.FullName)) { continue }
+                if ($OnDirectory) { & $OnDirectory $sub }
+                $stack.Push($sub.FullName)
+            }
+        } catch { }
+    }
+    return $skipped
+}
+
+function Measure-ContainedTreeBytes {
+    # Same safety rules as Invoke-ContainedTreeWalk, without a PowerShell call per file.
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [int]$OlderThanDays = 0
+    )
+    $sum = [int64]0
+    $rootFull = $null
+    try { $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\') } catch { return $sum }
+    $rootInfo = $null
+    try { $rootInfo = [System.IO.DirectoryInfo]::new($rootFull) } catch { return $sum }
+    if (-not $rootInfo.Exists) { return $sum }
+
+    $cutoff = $null
+    if ($OlderThanDays -gt 0) { $cutoff = (Get-Date).AddDays(-$OlderThanDays) }
+    $label = Split-Path $rootFull -Leaf
+    if ([string]::IsNullOrWhiteSpace($label)) { $label = $rootFull }
+    $n = 0
+    $cancelled = $false
+    $stack = New-Object 'System.Collections.Generic.Stack[string]'
+    $stack.Push($rootFull)
+    while ($stack.Count -gt 0) {
+        if (Test-CancelRequested) { break }
+        $current = [string]$stack.Pop()
+        $currentTrim = $current.TrimEnd('\')
+        if (($currentTrim -ne $rootFull) -and -not (Test-CleanupPathContained -RootFull $rootFull -CandidateFull $currentTrim)) {
+            continue
+        }
+        $di = $null
+        try { $di = [System.IO.DirectoryInfo]::new($currentTrim) } catch { continue }
+        if (-not $di.Exists) { continue }
+        if (($currentTrim -ne $rootFull) -and (Test-FileReparsePoint $di)) { continue }
+
+        try {
+            foreach ($f in $di.EnumerateFiles()) {
+                if (Test-FileReparsePoint $f) { continue }
+                if (-not (Test-CleanupPathContained -RootFull $rootFull -CandidateFull $f.FullName)) { continue }
+                if ($null -ne $cutoff) {
+                    try { if ($f.LastWriteTime -ge $cutoff) { continue } } catch { continue }
+                }
+                try { $sum += [int64]$f.Length } catch { }
+                $n++
+                if (($n % 2000) -eq 0) {
+                    if (Test-CancelRequested) { $cancelled = $true; break }
+                    $status = ("Measuring {0}  |  {1:N0} files  |  {2}" -f $label, $n, (Format-UiByteSize $sum))
+                    if (Get-Command Set-UiStatusText -EA SilentlyContinue) { Set-UiStatusText $status }
+                    if (Get-Command Update-GuiStatusBar -EA SilentlyContinue) { Update-GuiStatusBar -JobText $status }
+                    if (Get-Command Pump-UiThrottled -EA SilentlyContinue) { Pump-UiThrottled }
+                }
+            }
+        } catch { }
+        if ($cancelled) { break }
+
+        try {
+            foreach ($sub in $di.EnumerateDirectories()) {
+                if (Test-FileReparsePoint $sub) { continue }
+                if (-not (Test-CleanupPathContained -RootFull $rootFull -CandidateFull $sub.FullName)) { continue }
+                $stack.Push($sub.FullName)
+            }
+        } catch { }
+    }
+    return $sum
+}
+
 function Test-SafeCleanupPath {
     # Structural guard for every recursive delete. Fails closed.
     param([string]$Path)
@@ -619,9 +836,35 @@ function Test-SafeCleanupPath {
         if ($key -eq $protected) { return $false }
     }
 
-    # Shallowest path we ever clean is C:\Windows\Temp - two segments below the root
+    # Shallowest path we ever clean is Windows\Temp - two segments below the root
     $segments = @($norm -split '[\\/]+' | Where-Object { $_ -and $_ -notmatch '^[A-Za-z]:$' })
     if ($segments.Count -lt 2) { return $false }
+
+    # Exact denylist does not cover children. Refuse whole trees we never mean to clean.
+    foreach ($name in @('Desktop', 'Documents', 'Downloads', 'Pictures', 'Videos', 'Music', 'Saved Games')) {
+        $folder = Join-PathSafe $env:USERPROFILE $name
+        if ($folder -and (Test-NormalizedPathUnder -ChildKey $key -ParentPath $folder)) { return $false }
+    }
+    $programs = Join-PathSafe $env:LOCALAPPDATA 'Programs'
+    if ($programs -and (Test-NormalizedPathUnder -ChildKey $key -ParentPath $programs)) { return $false }
+    if ($env:PUBLIC -and (Test-NormalizedPathUnder -ChildKey $key -ParentPath $env:PUBLIC)) { return $false }
+
+    $drive = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\') } else { $null }
+    $usersRoot = if ($drive) { ($drive + '\Users') } else { $null }
+    if ($usersRoot -and (Test-NormalizedPathUnder -ChildKey $key -ParentPath $usersRoot)) {
+        if (-not ($env:USERPROFILE -and (Test-NormalizedPathUnder -ChildKey $key -ParentPath $env:USERPROFILE))) {
+            return $false
+        }
+    }
+
+    # Under Windows, only Temp and the Update download cache are eligible.
+    if ($env:SystemRoot -and (Test-NormalizedPathUnder -ChildKey $key -ParentPath $env:SystemRoot)) {
+        $winTemp = Get-WindowsTempPath
+        $winUpdate = Get-WindowsUpdateDownloadPath
+        $underTemp = Test-NormalizedPathUnder -ChildKey $key -ParentPath $winTemp
+        $underUpdate = Test-NormalizedPathUnder -ChildKey $key -ParentPath $winUpdate
+        if (-not $underTemp -and -not $underUpdate) { return $false }
+    }
 
     return $true
 }
@@ -637,67 +880,54 @@ function Assert-SafeCleanupPath {
 function Remove-OldFilesInPath {
     param([string]$Path, [int]$OlderThanDays, [switch]$DeleteFoldersToo)
     if (-not (Assert-SafeCleanupPath -Path $Path -Operation 'cleanup')) { return 0 }
-    if (-not (Test-Path $Path)) { return 0 }
+    if (-not (Test-Path -LiteralPath $Path)) { return 0 }
     Assert-NotCancelled
     $cutoff = (Get-Date).AddDays(-$OlderThanDays)
-    $freed = 0L
-    $n = 0
+    $acc = @{ Freed = [long]0; N = 0; LastLogN = 0 }
     $label = Split-Path $Path -Leaf
     if ([string]::IsNullOrWhiteSpace($label)) { $label = $Path }
-    $lastLogN = 0
     Update-CleanupLiveStatus -PathLabel $label -Files 0 -Bytes 0
     Pump-UiThrottled
 
-    # Stream via .NET to avoid Get-ChildItem pipeline + Where-Object overhead on huge trees.
-    $enumFailedEarly = $false
-    try {
-        $rootInfo = [System.IO.DirectoryInfo]::new($Path)
-        foreach ($f in $rootInfo.EnumerateFiles('*', [System.IO.SearchOption]::AllDirectories)) {
-            if (Test-CancelRequested) { break }
-            if ($OlderThanDays -gt 0 -and $f.LastWriteTime -ge $cutoff) { continue }
-            $len = 0L
-            try { $len = [long]$f.Length } catch { }
-            try {
-                # Remove-Item -Force clears ReadOnly; FileInfo.Delete() does not.
-                Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop
-                $freed += $len
-                $n++
-            } catch { }
-            if (($n % 80) -eq 0 -and $n -gt 0) {
-                Assert-NotCancelled
-                Update-CleanupLiveStatus -PathLabel $label -Files $n -Bytes $freed
-                Pump-UiThrottled
-            }
-            if (($n - $lastLogN) -ge 250) {
-                $lastLogN = $n
-                Write-Info ("{0}: {1:N0} files, {2} so far..." -f $label, $n, (Format-UiByteSize $freed))
-            }
+    $dirs = [System.Collections.Generic.List[string]]::new()
+    # GetNewClosure binds $acc/$dirs into the callbacks. A bare scriptblock would
+    # run in the walker's scope and miss these locals.
+    $onFile = {
+        param($f)
+        if (Test-CancelRequested) { return }
+        if ($OlderThanDays -gt 0 -and $f.LastWriteTime -ge $cutoff) { return }
+        $len = 0L
+        try { $len = [long]$f.Length } catch { }
+        try {
+            # Remove-Item -Force clears ReadOnly; FileInfo.Delete() does not.
+            Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop
+            $acc.Freed = [long]$acc.Freed + $len
+            $acc.N = [int]$acc.N + 1
+        } catch { }
+        $nNow = [int]$acc.N
+        if (($nNow % 80) -eq 0 -and $nNow -gt 0) {
+            Assert-NotCancelled
+            Update-CleanupLiveStatus -PathLabel $label -Files $nNow -Bytes ([long]$acc.Freed)
+            Pump-UiThrottled
         }
-    } catch {
-        # Only full-fallback when the walk never started (root access denied).
-        if ($n -eq 0 -and $freed -eq 0) { $enumFailedEarly = $true }
-        else { Write-Warn ("{0}: scan interrupted after {1:N0} file(s)" -f $label, $n) }
-    }
-    if ($enumFailedEarly) {
-        Get-ChildItem -Path $Path -Recurse -Force -File -ErrorAction SilentlyContinue |
-            ForEach-Object {
-                if (Test-CancelRequested) { return }
-                if ($OlderThanDays -gt 0 -and $_.LastWriteTime -ge $cutoff) { return }
-                $len = 0L
-                try { $len = [long]$_.Length } catch { }
-                try {
-                    Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
-                    $freed += $len
-                    $n++
-                } catch { }
-                if (($n % 80) -eq 0 -and $n -gt 0) {
-                    Assert-NotCancelled
-                    Update-CleanupLiveStatus -PathLabel $label -Files $n -Bytes $freed
-                    Pump-UiThrottled
-                }
-            }
-    }
+        if (($nNow - [int]$acc.LastLogN) -ge 250) {
+            $acc.LastLogN = $nNow
+            Write-Info ("{0}: {1:N0} files, {2} so far..." -f $label, $nNow, (Format-UiByteSize ([long]$acc.Freed)))
+        }
+    }.GetNewClosure()
+    $onDir = {
+        param($d)
+        if ($DeleteFoldersToo) { [void]$dirs.Add($d.FullName) }
+    }.GetNewClosure()
+    # Manual walk: AllDirectories follows junctions, and a prefix check on the
+    # path you used to get there still looks "inside" the approved folder.
+    $skipped = Invoke-ContainedTreeWalk -Root $Path -OnFile $onFile -OnDirectory $onDir
 
+    $freed = [long]$acc.Freed
+    $n = [int]$acc.N
+    if ($skipped -gt 0) {
+        Write-Info ("{0}: skipped {1} reparse point(s)" -f $label, $skipped)
+    }
     if ($n -gt 0) {
         Update-CleanupLiveStatus -PathLabel $label -Files $n -Bytes $freed
         Pump-UiThrottled
@@ -705,32 +935,23 @@ function Remove-OldFilesInPath {
     if (Test-CancelRequested) { return $freed }
     if ($DeleteFoldersToo) {
         $dirN = 0
-        $dirs = [System.Collections.Generic.List[string]]::new()
-        try {
-            $rootInfo = [System.IO.DirectoryInfo]::new($Path)
-            foreach ($d in $rootInfo.EnumerateDirectories('*', [System.IO.SearchOption]::AllDirectories)) {
-                [void]$dirs.Add($d.FullName)
-            }
-        } catch {
-            Get-ChildItem -Path $Path -Recurse -Force -Directory -ErrorAction SilentlyContinue |
-                ForEach-Object { [void]$dirs.Add($_.FullName) }
-        }
+        $rootFull = $null
+        try { $rootFull = [System.IO.Path]::GetFullPath($Path).TrimEnd('\') } catch { $rootFull = $null }
         # Deepest paths first so parents empty after children are removed.
         $sorted = @($dirs | Sort-Object { $_.Length } -Descending)
         foreach ($dirPath in $sorted) {
             if (Test-CancelRequested) { break }
+            if ($rootFull -and -not (Test-CleanupPathContained -RootFull $rootFull -CandidateFull $dirPath)) { continue }
             try {
                 $di = [System.IO.DirectoryInfo]::new($dirPath)
-                if ($di.Exists) {
-                    if (($di.Attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
-                        $di.Attributes = ($di.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly))
-                    }
-                    # non-recursive: only succeeds when empty (no per-dir listing probe)
-                    [System.IO.Directory]::Delete($dirPath, $false)
+                if (-not $di.Exists) { continue }
+                if (Test-FileReparsePoint $di) { continue }
+                if (($di.Attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+                    $di.Attributes = ($di.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly))
                 }
-            } catch {
-                try { Remove-Item -LiteralPath $dirPath -Force -EA SilentlyContinue } catch { }
-            }
+                # non-recursive: only succeeds when empty (no per-dir listing probe)
+                [System.IO.Directory]::Delete($dirPath, $false)
+            } catch { }
             $dirN++
             if (($dirN % 60) -eq 0) { Pump-UiThrottled }
         }
@@ -742,23 +963,14 @@ function Invoke-TempCleanup {
     Write-Step "Cleaning temp files (older than $($Script:TempOlderThanDays) day(s))"
     $total = 0L
     # GPU shader caches are handled only by Invoke-ShaderCacheCleanup (checkbox-driven)
-    $raw = @(
+    $paths = @(Select-UniqueCleanupPaths -Paths @(
         $env:TEMP,
         "$env:LOCALAPPDATA\Temp",
-        "C:\Windows\Temp",
+        (Get-WindowsTempPath),
         "$env:LOCALAPPDATA\CrashDumps",
         "$env:LOCALAPPDATA\Microsoft\Windows\INetCache",
         "$env:LOCALAPPDATA\Microsoft\Windows\WebCache"
-    )
-    $paths = @()
-    $seen = @{}
-    foreach ($p in $raw) {
-        if (-not (Test-Path $p)) { continue }
-        try {
-            $full = (Resolve-Path $p -EA Stop).Path.ToLowerInvariant()
-            if (-not $seen.ContainsKey($full)) { $seen[$full] = $true; $paths += $p }
-        } catch { $paths += $p }
-    }
+    ))
 
     $i = 0
     foreach ($p in $paths) {
@@ -781,8 +993,8 @@ function Invoke-TempCleanup {
             Write-Info "Skipped Windows Update download-cache wipe (updates will run next)"
         } else {
             Write-Info "Clearing Windows Update download cache..."
-            $do = Join-PathSafe $env:SystemRoot 'SoftwareDistribution\Download'
-            if ($do -and (Assert-SafeCleanupPath -Path $do -Operation 'update cache wipe') -and (Test-Path $do)) {
+            $do = Get-WindowsUpdateDownloadPath
+            if ($do -and (Assert-SafeCleanupPath -Path $do -Operation 'update cache wipe') -and (Test-Path -LiteralPath $do)) {
                 $wuStopped = $false
                 $bitsStopped = $false
                 try {
@@ -792,7 +1004,8 @@ function Invoke-TempCleanup {
                     $bitsStopped = $true
                     Start-Sleep -Seconds 2
                     $freeBefore = Get-CFreeGB -Refresh
-                    Get-ChildItem $do -Force -EA SilentlyContinue | Remove-Item -Recurse -Force -EA SilentlyContinue
+                    # Same contained walk as every other delete. Do not Remove-Item -Recurse.
+                    [void](Remove-OldFilesInPath -Path $do -OlderThanDays 0 -DeleteFoldersToo)
                     $freeAfter = Get-CFreeGB -Refresh
                     $approxBytes = [math]::Max(0L, [long](($freeAfter - $freeBefore) * 1GB))
                     $total += $approxBytes
@@ -1212,6 +1425,69 @@ function Start-WindowsUpdateFallbackScan {
     }
 }
 
+function ConvertFrom-WingetUpgradeList {
+    # winget prints three tables. "upgrade --all" only installs the first.
+    # Unity editors and similar packages sit in "explicit targeting" and are skipped with no error.
+    param([string]$Text)
+    $bulk = New-Object System.Collections.Generic.List[string]
+    $explicit = New-Object System.Collections.Generic.List[string]
+    $unknown = New-Object System.Collections.Generic.List[string]
+    $section = 'bulk'
+    $idCol = -1
+    $verCol = -1
+    foreach ($line in ([string]$Text -split "`r?`n")) {
+        if ($line -match '^\s*$') { continue }
+        if ($line -match '(?i)explicit targeting') { $section = 'explicit'; $idCol = -1; $verCol = -1; continue }
+        if ($line -match '(?i)cannot be determined') { $section = 'unknown'; $idCol = -1; $verCol = -1; continue }
+        if ($line -match '^Name\s+Id\s+Version') {
+            $idCol = $line.IndexOf('Id')
+            $verCol = $line.IndexOf('Version')
+            continue
+        }
+        if ($line -match '^-+' -or $line -match '\d\s+upgrades?\s+available' -or $line -match '^\s*\d+\s+package' -or $line -match 'The following packages' -or $line -match 'have an upgrade available' -or $line -match 'No installed package found' -or $line -match 'No newer package versions') {
+            continue
+        }
+
+        $id = $null
+        if ($idCol -ge 0 -and $verCol -gt $idCol -and $line.Length -gt $idCol) {
+            $end = [Math]::Min($verCol, $line.Length)
+            $id = $line.Substring($idCol, $end - $idCol).Trim()
+            if ($id -match '\s') { $id = $null }
+        }
+        if (-not $id) {
+            $idMatches = [regex]::Matches($line, '(?<![A-Za-z0-9_.+-])([A-Za-z][A-Za-z0-9_+-]*(?:\.[A-Za-z0-9][A-Za-z0-9_+-]*)+)(?![A-Za-z0-9_.+-])')
+            if ($idMatches.Count -gt 0) {
+                $id = $idMatches[$idMatches.Count - 1].Groups[1].Value
+            }
+        }
+        $idValid = ($id -cmatch '^[A-Za-z][A-Za-z0-9_+-]*(?:\.[A-Za-z0-9][A-Za-z0-9_+-]*)+$') -or
+                   ($id -cmatch '^[A-Z0-9]{8,16}$')
+        if (-not $idValid -or $id -match '^(Name|Id|Version|Available|Source|winget|msstore)$' -or $id -match '^\d') { continue }
+
+        $dest = $bulk
+        if ($section -eq 'explicit') { $dest = $explicit }
+        elseif ($section -eq 'unknown') { $dest = $unknown }
+        if (-not $dest.Contains($id)) { [void]$dest.Add($id) }
+    }
+    return [pscustomobject]@{
+        Bulk     = [string[]]@($bulk.ToArray())
+        Explicit = [string[]]@($explicit.ToArray())
+        Unknown  = [string[]]@($unknown.ToArray())
+    }
+}
+
+function Get-WingetUpgradeOutcome {
+    param([string]$Text, $ExitCode = 0)
+    if ($Text -match '(?i)Successfully (installed|upgraded)') { return 'Upgraded' }
+    if ($Text -match '(?i)No applicable upgrade|No newer package versions|No installed package found matching') { return 'Current' }
+    if ($Text -match '(?i)interactive|user interaction|does not support silent|requires .+ interaction|cannot be run silently') { return 'NeedsInteraction' }
+    $code = 0
+    try { $code = [int]$ExitCode } catch { $code = 0 }
+    if ($code -ne 0) { return 'Failed' }
+    if ($Text -match '(?i)installer failed|installation failed|failed to install|exit code') { return 'Failed' }
+    return 'Finished'
+}
+
 function Invoke-WingetUpdates {
     Write-Step "Upgrading apps (winget)"
     # Packages that winget repeatedly "upgrades" (unknown versions / self-updaters) - skip them
@@ -1244,71 +1520,55 @@ function Invoke-WingetUpdates {
             return
         }
 
-        if ($listOut -match "No newer package versions" -or
-            ($listOut -match "No installed package found matching input criteria" -and $listOut -notmatch '\dupgrades?\s+available')) {
-            Write-Ok "winget apps are up to date"
-            return
-        }
-
-        $packageLines = @()
+        # Always parse. "No newer package versions" can sit above an explicit-targeting
+        # table (Unity editors). Returning early there hid those apps with no message.
+        $parsed = ConvertFrom-WingetUpgradeList -Text $listOut
         $packageIds = [System.Collections.Generic.List[string]]::new()
+        $explicitIds = [System.Collections.Generic.List[string]]::new()
+        $unknownIds = [System.Collections.Generic.List[string]]::new()
         $skipped = [System.Collections.Generic.List[string]]::new()
-        $idCol = -1
-        $verCol = -1
-        foreach ($line in ($listOut -split "`r?`n")) {
-            if ($line -match '^\s*$') { continue }
-            if ($line -match '^Name\s+Id\s+Version') {
-                $idCol = $line.IndexOf('Id')
-                $verCol = $line.IndexOf('Version')
-                continue
-            }
-            if ($line -match '^-+' -or $line -match '^\s*\d+\s+upgrades? available' -or $line -match '\d\s+upgrades?\s+available' -or $line -match '^\s*\d+\s+package' -or $line -match 'The following packages' -or $line -match 'require explicit targeting' -or $line -match 'have an upgrade available' -or $line -match 'No installed package found' -or $line -match 'No newer package versions' -or $line -match 'version numbers that cannot be determined') {
-                continue
-            }
-
-            $id = $null
-            # Fixed-width columns from header (handles Node.js names and msstore Ids)
-            if ($idCol -ge 0 -and $verCol -gt $idCol -and $line.Length -gt $idCol) {
-                $end = [Math]::Min($verCol, $line.Length)
-                $id = $line.Substring($idCol, $end - $idCol).Trim()
-                # Reject prose fragments sliced out of summary/footer lines
-                if ($id -match '\s') { $id = $null }
-            }
-            if (-not $id) {
-                # Fallback: last Publisher.Product-style token before version columns
-                $idMatches = [regex]::Matches($line, '(?<![A-Za-z0-9_.+-])([A-Za-z][A-Za-z0-9_+-]*(?:\.[A-Za-z0-9][A-Za-z0-9_+-]*)+)(?![A-Za-z0-9_.+-])')
-                if ($idMatches.Count -gt 0) {
-                    $id = $idMatches[$idMatches.Count - 1].Groups[1].Value
+        foreach ($entry in @(
+            @{ Ids = @($parsed.Bulk); Dest = $packageIds },
+            @{ Ids = @($parsed.Explicit); Dest = $explicitIds },
+            @{ Ids = @($parsed.Unknown); Dest = $unknownIds }
+        )) {
+            foreach ($id in @($entry.Ids)) {
+                if ([string]::IsNullOrWhiteSpace($id)) { continue }
+                $skip = $false
+                foreach ($s in $wingetSkipIds) {
+                    if ($id -ieq $s) { $skip = $true; break }
                 }
-            }
-            # Only accept real package Ids: Publisher.Product style, or msstore-style (e.g. 9WZDNCRFJ3TZ)
-            $idValid = ($id -cmatch '^[A-Za-z][A-Za-z0-9_+-]*(?:\.[A-Za-z0-9][A-Za-z0-9_+-]*)+$') -or
-                       ($id -cmatch '^[A-Z0-9]{8,16}$')
-            if (-not $idValid -or $id -match '^(Name|Id|Version|Available|Source|winget|msstore)$' -or $id -match '^\d') { continue }
-
-            $skip = $false
-            foreach ($s in $wingetSkipIds) {
-                if ($id -ieq $s) { $skip = $true; break }
-            }
-            if ($skip) {
-                if (-not ($skipped -contains $id)) { [void]$skipped.Add($id) }
-                continue
-            }
-            if (-not ($packageIds -contains $id)) {
-                [void]$packageIds.Add($id)
-                $packageLines += $line.Trim()
+                if ($skip) {
+                    if (-not ($skipped -contains $id)) { [void]$skipped.Add($id) }
+                    continue
+                }
+                if (-not $entry.Dest.Contains($id)) { [void]$entry.Dest.Add($id) }
             }
         }
         if ($skipped.Count -gt 0) {
             Write-Info ("Skipping self-updating apps: {0}" -f (($skipped | Select-Object -Unique) -join ", "))
         }
+        if ($unknownIds.Count -gt 0) {
+            Write-Warn ("Not upgraded (winget cannot tell the installed version, so a silent upgrade is unsafe): {0}" -f ($unknownIds -join ", "))
+        }
+        if ($explicitIds.Count -gt 0) {
+            Write-Info ("Need a direct upgrade (winget leaves these out of upgrade --all): {0}" -f ($explicitIds -join ", "))
+        }
 
         $countFromFooter = 0
         if ($listOut -match '(\d+)\s+upgrades?\s+available') { $countFromFooter = [int]$Matches[1] }
         $count = $packageIds.Count
-        if ($count -eq 0) {
-            if ($skipped.Count -gt 0) {
-                Write-Ok "winget apps are up to date (only self-updating apps had upgrades; those are skipped)"
+        if ($count -eq 0 -and $explicitIds.Count -eq 0) {
+            if ($listOut -match '(?i)explicit targeting' -and $explicitIds.Count -eq 0) {
+                Write-Warn "winget listed packages that need a direct upgrade, but their Ids could not be read. Nothing was changed."
+                return
+            }
+            if ($skipped.Count -gt 0 -or $unknownIds.Count -gt 0) {
+                Write-Ok "winget bulk list is clear (see notes above for anything left out)"
+                return
+            }
+            if ($listOut -match '(?i)cannot be determined') {
+                Write-Warn "winget hid one or more apps because it cannot tell the installed version. They were not upgraded."
                 return
             }
             if ($countFromFooter -gt 0) {
@@ -1320,24 +1580,36 @@ function Invoke-WingetUpdates {
             return
         }
 
-        Write-Info ("Found {0} upgradeable package(s): {1}" -f $count, ($packageIds -join ", "))
-        $preview = ($packageLines | Select-Object -First 12) -join "`n"
-        if ($packageLines.Count -gt 12) { $preview += "`n..." }
+        Write-Info ("Found {0} bulk upgrade(s): {1}" -f $count, $(if ($count) { $packageIds -join ", " } else { "(none)" }))
+        $preview = (@($packageIds) | Select-Object -First 12) -join "`n"
+        if ($packageIds.Count -gt 12) { $preview += "`n..." }
 
-        $msg = "winget will upgrade $count package(s) from the winget source (silent bulk upgrade).`n`nThis can update browsers, runtimes, and other apps.`nSelf-updaters (Roblox, Discord, Steam, Epic) are skipped.`n`nContinue?"
+        $msg = "winget will upgrade $count package(s) in one silent pass.`n`nInstallers are not opened one by one. This can update browsers, runtimes, and other apps.`nSelf-updaters (Roblox, Discord, Steam, Epic) are skipped.`n`nContinue?"
+        if ($explicitIds.Count -gt 0) {
+            $msg += "`n`nDirect silent upgrades (not included in the bulk pass):`n" + ($explicitIds -join "`n")
+        }
+        if ($unknownIds.Count -gt 0) {
+            $msg += "`n`nLeft alone (version unknown):`n" + ($unknownIds -join "`n")
+        }
         if ($preview) { $msg += "`n`n" + $preview }
-        $proceed = $true
-        try {
-            $r = Show-UiMessageBox `
-                -Text $msg `
-                -Caption "Confirm winget upgrades" `
-                -Buttons ([System.Windows.Forms.MessageBoxButtons]::YesNo) `
-                -Icon ([System.Windows.Forms.MessageBoxIcon]::Question)
-            $proceed = ($r -eq [System.Windows.Forms.DialogResult]::Yes)
-        } catch {
-            Write-Host $msg
-            $ans = Read-Host "Continue with winget upgrades? (Y/N)"
-            $proceed = ($ans -match '^[Yy]')
+        $proceed = $false
+        if ($Script:HeadlessRun) {
+            # Saved HomeWinget is the opt-in. A hidden Sunday task cannot wait on a dialog.
+            Write-Info "Scheduled run: winget upgrades were saved on, so they run without a prompt."
+            $proceed = $true
+        } else {
+            try {
+                $r = Show-UiMessageBox `
+                    -Text $msg `
+                    -Caption "Confirm winget upgrades" `
+                    -Buttons ([System.Windows.Forms.MessageBoxButtons]::YesNo) `
+                    -Icon ([System.Windows.Forms.MessageBoxIcon]::Question)
+                $proceed = ($r -eq [System.Windows.Forms.DialogResult]::Yes)
+            } catch {
+                Write-Host $msg
+                $ans = Read-Host "Continue with winget upgrades? (Y/N)"
+                $proceed = ($ans -match '^[Yy]')
+            }
         }
         if (-not $proceed) {
             Write-Warn "winget upgrades skipped by user"
@@ -1345,112 +1617,80 @@ function Invoke-WingetUpdates {
         }
 
         Assert-NotCancelled
-        Write-Info "Installing winget upgrades (bulk silent - much faster)..."
-        $idsJoined = [string]::Join("`n", [string[]]@($packageIds))
-        $skipJoined = [string]::Join("`n", [string[]]@($wingetSkipIds))
+        Write-Info "Upgrading every listed app in one silent winget pass. App updaters are not opened one by one."
+        if ($explicitIds.Count -gt 0) {
+            Write-Info "After that, direct silent upgrades for packages winget excludes from --all."
+        }
+        # Only pin self-updaters that actually showed up. Pinning the whole skip
+        # list, then upgrading each id, is what made a long queue open installer after installer.
         $skippedJoined = [string]::Join("`n", [string[]]@($skipped))
-        $outObj = Invoke-WithUiWait -Activity "winget upgrade" -TimeoutSec 1800 -ArgumentList @($winget, $skipJoined, $skippedJoined, $idsJoined) -ScriptBlock {
-            param([string]$WingetPath, [string]$SkipJoined, [string]$SkippedJoined, [string]$IdsJoined)
-            $skipIds = @()
-            if ($SkipJoined -and $SkipJoined.Trim()) {
-                $skipIds = @($SkipJoined -split "`n" | Where-Object { $_ -and $_.Trim() })
-            }
+        $explicitJoined = [string]::Join("`n", [string[]]@($explicitIds))
+        $bulkCount = $packageIds.Count
+        $outObj = Invoke-WithUiWait -Activity "winget upgrade" -TimeoutSec 3600 -ArgumentList @($winget, $skippedJoined, $explicitJoined, $bulkCount) -ScriptBlock {
+            param([string]$WingetPath, [string]$SkippedJoined, [string]$ExplicitJoined, [int]$BulkCount)
             $mustPin = @()
             if ($SkippedJoined -and $SkippedJoined.Trim()) {
                 $mustPin = @($SkippedJoined -split "`n" | Where-Object { $_ -and $_.Trim() })
             }
-            $Ids = @()
-            if ($IdsJoined -and $IdsJoined.Trim()) {
-                $Ids = @($IdsJoined -split "`n" | Where-Object { $_ -and $_.Trim() })
-            }
-
-            function Invoke-WingetPerIdUpgrade {
-                param([string]$WingetPath, [string[]]$Ids)
-                $parts = New-Object System.Collections.Generic.List[string]
-                $ok = 0
-                $fail = 0
-                $okIds = New-Object System.Collections.Generic.List[string]
-                $failIds = New-Object System.Collections.Generic.List[string]
-                foreach ($id in $Ids) {
-                    [void]$parts.Add(("--- upgrading {0} ---" -f $id))
-                    $text = & $WingetPath upgrade --id $id --exact --source winget --silent --disable-interactivity --accept-package-agreements --accept-source-agreements 2>&1 | Out-String
-                    [void]$parts.Add($text)
-                    if ($text -match "Successfully installed") {
-                        $ok++
-                        [void]$okIds.Add($id)
-                    } elseif ($text -match "does not apply to your system") {
-                        $fail++
-                        [void]$failIds.Add("$id (not applicable to this PC)")
-                    } elseif ($text -match "No applicable upgrade|No newer package versions") {
-                        # already current
-                    } else {
-                        $fail++
-                        [void]$failIds.Add($id)
-                    }
-                }
-                return [pscustomobject]@{
-                    Mode      = 'PerId'
-                    Output    = ($parts -join "`n")
-                    OkCount   = $ok
-                    FailCount = $fail
-                    OkIds     = ($okIds -join ", ")
-                    FailIds   = ($failIds -join ", ")
-                }
-            }
-
-            # Snapshot pins so we only remove ones we add
-            $pinList = & $WingetPath pin list --disable-interactivity 2>&1 | Out-String
-            $alreadyPinned = @{}
-            foreach ($s in $skipIds) {
-                if ($pinList -and ($pinList -match [regex]::Escape($s))) {
-                    $alreadyPinned[$s] = $true
-                }
-            }
 
             $addedPins = New-Object System.Collections.Generic.List[string]
-            $pinBlockFailed = New-Object System.Collections.Generic.List[string]
+            $pinFailed = New-Object System.Collections.Generic.List[string]
             try {
-                foreach ($s in $skipIds) {
-                    if ($alreadyPinned.ContainsKey($s)) { continue }
-                    $pinOut = & $WingetPath pin add --id $s --exact --blocking --disable-interactivity --accept-source-agreements 2>&1 | Out-String
-                    $pinOk = ($LASTEXITCODE -eq 0) -or ($pinOut -match '(?i)pin added|already exists|already pinned')
-                    if ($pinOk) {
-                        [void]$addedPins.Add($s)
-                    } elseif ($mustPin -contains $s) {
-                        # This self-updater has an available upgrade and we could not pin it -
-                        # refuse bulk --all so we do not upgrade it by accident.
-                        [void]$pinBlockFailed.Add($s)
+                if ($mustPin.Count -gt 0) {
+                    $pinList = & $WingetPath pin list --disable-interactivity 2>&1 | Out-String
+                    foreach ($s in $mustPin) {
+                        if ($pinList -and ($pinList -match [regex]::Escape($s))) { continue }
+                        $pinOut = & $WingetPath pin add --id $s --exact --blocking --disable-interactivity --accept-source-agreements 2>&1 | Out-String
+                        $pinOk = ($LASTEXITCODE -eq 0) -or ($pinOut -match '(?i)pin added|already exists|already pinned')
+                        if ($pinOk) { [void]$addedPins.Add($s) } else { [void]$pinFailed.Add($s) }
                     }
                 }
 
-                if ($pinBlockFailed.Count -gt 0) {
-                    $fallback = Invoke-WingetPerIdUpgrade -WingetPath $WingetPath -Ids $Ids
-                    $fallback | Add-Member -NotePropertyName Note -NotePropertyValue ("Bulk skipped; could not pin: " + ($pinBlockFailed -join ', ')) -Force
-                    return $fallback
+                # One process for the normal list. Do not walk every package.
+                $bulkText = ''
+                $bulkExit = 0
+                $ok = 0
+                $fail = 0
+                if ($BulkCount -gt 0) {
+                    $bulkText = & $WingetPath upgrade --all --source winget --silent --disable-interactivity --accept-package-agreements --accept-source-agreements 2>&1 | Out-String
+                    $bulkExit = $LASTEXITCODE
+                    $ok = ([regex]::Matches($bulkText, '(?i)Successfully (installed|upgraded)')).Count
+                    $fail = ([regex]::Matches($bulkText, '(?i)installation failed|installer failed|failed to install|Installer failed')).Count
                 }
-
-                $bulkText = & $WingetPath upgrade --all --source winget --silent --disable-interactivity --accept-package-agreements --accept-source-agreements 2>&1 | Out-String
-                $bulkExit = $LASTEXITCODE
-                $ok = ([regex]::Matches($bulkText, 'Successfully installed')).Count
-                $upToDate = ($bulkText -match 'No applicable upgrade|No newer package versions|No installed package found matching input criteria') -and ($ok -eq 0)
-
-                if ($ok -gt 0 -or $upToDate -or $bulkExit -eq 0) {
-                    return [pscustomobject]@{
-                        Mode      = 'Bulk'
-                        Output    = $bulkText
-                        OkCount   = $ok
-                        FailCount = 0
-                        OkIds     = ''
-                        FailIds   = ''
-                        Note      = 'Bulk silent upgrade (--source winget)'
-                    }
+                $direct = New-Object System.Collections.Generic.List[object]
+                $explicitIdsLocal = @()
+                if ($ExplicitJoined -and $ExplicitJoined.Trim()) {
+                    $explicitIdsLocal = @($ExplicitJoined -split "`n" | Where-Object { $_ -and $_.Trim() })
                 }
-
-                # Bulk failed hard - fall back to per-id (still skips self-updaters)
-                $fallback = Invoke-WingetPerIdUpgrade -WingetPath $WingetPath -Ids $Ids
-                $fallback | Add-Member -NotePropertyName Note -NotePropertyValue 'Bulk failed; used per-id fallback' -Force
-                $fallback.Output = ("--- bulk attempt ---`n" + $bulkText + "`n" + $fallback.Output)
-                return $fallback
+                foreach ($id in $explicitIdsLocal) {
+                    $text = & $WingetPath upgrade --id $id --exact --source winget --silent --disable-interactivity --accept-package-agreements --accept-source-agreements 2>&1 | Out-String
+                    [void]$direct.Add([pscustomobject]@{
+                        Id       = $id
+                        Output   = $text
+                        ExitCode = $LASTEXITCODE
+                    })
+                }
+                $note = 'One silent winget pass for the normal list'
+                if ($explicitIdsLocal.Count -gt 0) {
+                    $note += ('. Direct upgrades: ' + ($explicitIdsLocal -join ', '))
+                }
+                if ($pinFailed.Count -gt 0) {
+                    $note += ('. Could not pin self-updaters: ' + ($pinFailed -join ', '))
+                }
+                $failCount = $fail
+                if ($BulkCount -gt 0 -and $bulkExit -ne 0 -and $failCount -eq 0 -and $ok -eq 0 -and $bulkText -notmatch 'No applicable upgrade|No newer package versions|No installed package found matching input criteria') {
+                    $failCount = 1
+                }
+                return [pscustomobject]@{
+                    Mode      = 'Bulk'
+                    Output    = $bulkText
+                    OkCount   = $ok
+                    FailCount = $failCount
+                    OkIds     = ''
+                    FailIds   = ''
+                    Note      = $note
+                    Direct    = @($direct.ToArray())
+                }
             } finally {
                 foreach ($s in @($addedPins)) {
                     & $WingetPath pin remove --id $s --exact --disable-interactivity --accept-source-agreements 2>&1 | Out-Null
@@ -1477,23 +1717,41 @@ function Invoke-WingetUpdates {
             try { $note = [string]$outPayload.Note } catch { }
         } catch {
             $out = Get-AsyncResultText $outObj
-            if ($out -match "Successfully installed") {
-                $okCount = ([regex]::Matches($out, "Successfully installed")).Count
-            }
+            $okCount = ([regex]::Matches($out, '(?i)Successfully (installed|upgraded)')).Count
         }
 
         if ($note) { Write-Info $note }
-        if ($mode -eq 'Bulk' -and $okCount -eq 0 -and $failCount -eq 0) {
+        if ($mode -eq 'Bulk' -and $okCount -eq 0 -and $failCount -eq 0 -and $packageIds.Count -gt 0) {
             Write-Ok "winget bulk upgrade finished (apps current or already newest)"
         } elseif ($okCount -gt 0) {
-            Write-Ok ("winget upgraded {0} package(s)" -f $okCount)
+            Write-Ok ("winget upgraded {0} package(s) in the silent pass" -f $okCount)
         }
         if ($failCount -gt 0) {
-            Write-Warn ("winget failed for {0} package(s): {1}" -f $failCount, $(if ($failIds) { $failIds } else { "check the activity panel" }))
+            Write-Warn ("winget bulk pass reported {0} failure(s): {1}" -f $failCount, $(if ($failIds) { $failIds } else { "see the activity panel" }))
         }
-        if ($okCount -eq 0 -and $failCount -eq 0 -and $mode -ne 'Bulk') {
+        $directResults = @()
+        try { $directResults = @($outPayload.Direct) } catch { $directResults = @() }
+        foreach ($d in $directResults) {
+            if (-not $d -or -not $d.Id) { continue }
+            $outcome = Get-WingetUpgradeOutcome -Text ([string]$d.Output) -ExitCode $d.ExitCode
+            switch ($outcome) {
+                'Upgraded' { Write-Ok ("{0} upgraded (direct, because winget excludes it from upgrade --all)" -f $d.Id) }
+                'Current'  { Write-Ok ("{0} is already current" -f $d.Id) }
+                'NeedsInteraction' {
+                    Write-Warn ("{0} was not upgraded. Its installer has no silent mode, so no updater window was opened." -f $d.Id)
+                    Write-Info ("Update it from the app, or run: winget upgrade --id {0}" -f $d.Id)
+                }
+                'Finished' { Write-Ok ("{0} direct upgrade finished" -f $d.Id) }
+                default {
+                    Write-Warn ("{0} was not upgraded." -f $d.Id)
+                    $detail = ([string]$d.Output -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 1)
+                    if ($detail) { Write-Info $detail.Trim() }
+                }
+            }
+        }
+        if ($okCount -eq 0 -and $failCount -eq 0 -and $mode -ne 'Bulk' -and $directResults.Count -eq 0) {
             Write-Ok "winget apps are up to date"
-        } elseif ($okCount -eq 0 -and $failCount -gt 0) {
+        } elseif ($okCount -eq 0 -and $failCount -gt 0 -and $directResults.Count -eq 0) {
             Write-Warn "No packages were upgraded"
         }
     } catch {
@@ -1535,7 +1793,7 @@ function Invoke-ShaderCacheCleanup {
         "$env:LOCALAPPDATA\NVIDIA Corporation\NV_Cache"
     )
     foreach ($p in $paths) {
-        if (-not (Test-Path $p)) { continue }
+        if ([string]::IsNullOrWhiteSpace($p) -or -not (Test-Path -LiteralPath $p)) { continue }
         Write-Info ("Scanning {0}" -f $p)
         Pump-Ui
         $freed = Remove-OldFilesInPath -Path $p -OlderThanDays 0 -DeleteFoldersToo
@@ -1555,7 +1813,18 @@ function Join-PathSafe {
     param([string]$Base, [string]$Child)
     if ([string]::IsNullOrWhiteSpace($Base)) { return $null }
     try {
-        return [System.IO.Path]::Combine($Base.TrimEnd('\', '/'), $Child)
+        # Path.Combine('C:', 'Users') is the drive-relative path 'C:Users', not 'C:\Users'.
+        $base = $Base.Trim()
+        if ($base -match '^[A-Za-z]:\\?$') {
+            $base = $base.TrimEnd('\') + '\'
+        } else {
+            $base = $base.TrimEnd('\', '/')
+        }
+        $child = $Child
+        if ($child -and $base.EndsWith('\') -and ($child.StartsWith('\') -or $child.StartsWith('/'))) {
+            $child = $child.TrimStart('\', '/')
+        }
+        return [System.IO.Path]::Combine($base, $child)
     } catch {
         return $null
     }
@@ -1702,8 +1971,28 @@ function Invoke-NvidiaAppOpen {
     return $false
 }
 
+function Write-HeadlessRunLog {
+    param([string]$Summary)
+    $dir = Join-Path $env:LOCALAPPDATA 'PC-Maintenance-Kit'
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    $path = Join-Path $dir 'scheduled-last-run.log'
+    $body = @(
+        ("==== {0:yyyy-MM-dd HH:mm:ss} ====" -f (Get-Date)),
+        $Summary
+    ) -join "`r`n"
+    Set-Content -LiteralPath $path -Value $body -Encoding UTF8
+    Write-Info ("Headless summary saved to {0}" -f $path)
+    return $path
+}
+
 function Show-RebootRecommendedDialog {
     if (-not (Test-RebootPending)) { return }
+    if ($Script:HeadlessRun) {
+        Write-Warn "A restart is pending. Scheduled run will not prompt."
+        return
+    }
     try {
         [void](Show-UiMessageBox `
             -Text "Windows has a pending restart (often after updates).`n`nRestart when you finish gaming for best stability." `
@@ -1713,20 +2002,71 @@ function Show-RebootRecommendedDialog {
     } catch { }
 }
 
+function ConvertTo-DiskHealthName {
+    param($Value)
+    if ($null -eq $Value) { return 'Unknown' }
+    $text = [string]$Value
+    if ($text -match 'Healthy|Warning|Unhealthy') { return $text }
+    switch ($text) {
+        '0' { return 'Healthy' }
+        '1' { return 'Warning' }
+        '2' { return 'Unhealthy' }
+        default { return $text }
+    }
+}
+
+function ConvertTo-DiskMediaName {
+    param($Value)
+    if ($null -eq $Value) { return 'Unspecified' }
+    $text = [string]$Value
+    if ($text -match 'SSD|HDD|SCM|Unspecified') { return $text }
+    switch ($text) {
+        '3' { return 'HDD' }
+        '4' { return 'SSD' }
+        '5' { return 'SCM' }
+        default { return 'Unspecified' }
+    }
+}
+
 function Get-SystemDisk {
     param([switch]$Refresh)
-    if (-not $Refresh -and $null -ne $Script:SystemDiskCache -and (([datetime]::UtcNow - $Script:SystemDiskCacheUtc).TotalSeconds -lt 30)) {
+    # Hardware identity barely changes during a session. A short cache made every
+    # panel refresh after winget reload the Storage module and freeze the window.
+    if (-not $Refresh -and $null -ne $Script:SystemDiskCache -and (([datetime]::UtcNow - $Script:SystemDiskCacheUtc).TotalSeconds -lt 600)) {
         return $Script:SystemDiskCache
     }
     $phys = $null
     try {
-        $partition = Get-Partition -DriveLetter C -EA Stop
-        $phys = Get-PhysicalDisk -Number $partition.DiskNumber -EA SilentlyContinue
-        if (-not $phys) {
-            $phys = Get-PhysicalDisk | Where-Object { $_.DeviceId -eq $partition.DiskNumber } | Select-Object -First 1
+        # CIM avoids Import-Module Storage, which is what made the first scan feel stuck.
+        $part = @(Get-CimInstance -Namespace root\microsoft\windows\storage -ClassName MSFT_Partition -EA Stop |
+            Where-Object { $_.DriveLetter -eq 67 -or [string]$_.DriveLetter -eq 'C' } |
+            Select-Object -First 1)
+        $disk = $null
+        if ($part) {
+            $disk = @(Get-CimInstance -Namespace root\microsoft\windows\storage -ClassName MSFT_PhysicalDisk -EA Stop |
+                Where-Object { [string]$_.DeviceId -eq [string]$part[0].DiskNumber } |
+                Select-Object -First 1)
         }
-    } catch {
-        try { $phys = Get-PhysicalDisk | Select-Object -First 1 } catch { $phys = $null }
+        if ($disk) {
+            $phys = [pscustomobject]@{
+                FriendlyName = [string]$disk[0].FriendlyName
+                HealthStatus = (ConvertTo-DiskHealthName $disk[0].HealthStatus)
+                MediaType    = (ConvertTo-DiskMediaName $disk[0].MediaType)
+            }
+        }
+    } catch { }
+    if (-not $phys) {
+        try {
+            $partition = Get-Partition -DriveLetter C -EA Stop
+            $raw = Get-PhysicalDisk -Number $partition.DiskNumber -EA SilentlyContinue
+            if ($raw) {
+                $phys = [pscustomobject]@{
+                    FriendlyName = [string]$raw.FriendlyName
+                    HealthStatus = (ConvertTo-DiskHealthName $raw.HealthStatus)
+                    MediaType    = (ConvertTo-DiskMediaName $raw.MediaType)
+                }
+            }
+        } catch { }
     }
     $Script:SystemDiskCache = $phys
     $Script:SystemDiskCacheUtc = [datetime]::UtcNow
@@ -1771,14 +2111,22 @@ function Invoke-GamingChecks {
         $wu = Get-Service wuauserv -EA SilentlyContinue
         $bits = Get-Service bits -EA SilentlyContinue
         if ($wu -and $wu.Status -ne 'Running') {
-            Write-Warn "Windows Update service was stopped - starting it"
-            Start-Service wuauserv -EA SilentlyContinue
+            if ($Script:DoWinUpdate) {
+                Write-Warn "Windows Update service was stopped - starting it for this update run"
+                Start-Service wuauserv -EA SilentlyContinue
+            } else {
+                Write-Info "Windows Update service is stopped (left as-is)"
+            }
         } else {
             Write-Ok "Windows Update service: Running"
         }
         if ($bits -and $bits.Status -ne 'Running') {
-            Write-Warn "BITS service was stopped - starting it"
-            Start-Service bits -EA SilentlyContinue
+            if ($Script:DoWinUpdate) {
+                Write-Warn "BITS service was stopped - starting it for this update run"
+                Start-Service bits -EA SilentlyContinue
+            } else {
+                Write-Info "BITS service is stopped (left as-is)"
+            }
         }
     } catch { }
 
@@ -1852,13 +2200,11 @@ function Invoke-Repair {
         Write-Host ""
         $null = $p.WaitForExit(1000)
         $code = $p.ExitCode
-        $logText = ""
-        if (Test-Path $dismLog) { $logText = Get-Content $dismLog -Raw -EA SilentlyContinue }
-        $looksClean = ($logText -match "Ending Dism\.exe session") -and ($logText -notmatch ", Error\s+")
-        if (($null -eq $code -or $code -eq 0) -or $looksClean) {
+        if ($code -eq 0) {
             Write-Ok "DISM completed successfully"
         } else {
-            Write-Warn "DISM exit code $code - see $dismLog"
+            $shown = if ($null -eq $code) { 'unknown' } else { $code }
+            Write-Warn "DISM exit code $shown - see $dismLog"
         }
     } catch {
         if ($_.Exception.Message -match 'Cancelled') { throw }
@@ -1892,10 +2238,11 @@ function Invoke-Repair {
         Write-Host ""
         $null = $p.WaitForExit(1000)
         $code = $p.ExitCode
-        if ($null -eq $code -or $code -eq 0) {
+        if ($code -eq 0) {
             Write-Ok "SFC finished successfully"
         } else {
-            Write-Warn "SFC finished with exit $code - see CBS.log if issues persist"
+            $shown = if ($null -eq $code) { 'unknown' } else { $code }
+            Write-Warn "SFC finished with exit $shown - see CBS.log if issues persist"
         }
     } catch {
         if ($_.Exception.Message -match 'Cancelled') { throw }
@@ -1970,9 +2317,16 @@ function Invoke-MaintenanceRun {
     Append-UiLog "======== DONE ========" "Green"
     Append-UiLog $summary "Cyan"
     if (-not (Test-CancelRequested)) {
-        Show-RebootRecommendedDialog
-        if (Get-Command Show-RunSummaryDialog -EA SilentlyContinue) {
-            Show-RunSummaryDialog -Title "PC Maintenance - Summary" -Summary (Get-RunSummaryObject)
+        if ($Script:HeadlessRun) {
+            if (Test-RebootPending) {
+                Write-Warn "A restart is pending. Scheduled run will not prompt."
+            }
+            Write-HeadlessRunLog -Summary $summary
+        } else {
+            Show-RebootRecommendedDialog
+            if (Get-Command Show-RunSummaryDialog -EA SilentlyContinue) {
+                Show-RunSummaryDialog -Title "PC Maintenance - Summary" -Summary (Get-RunSummaryObject)
+            }
         }
     }
     Clear-TrackedProcesses

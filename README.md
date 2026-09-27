@@ -2,7 +2,7 @@
 
 Gamer-focused Windows 10/11 maintenance toolkit. Cleanup, gaming tweaks, controlled updates, and optional DISM/SFC repair — in a dark tabbed GUI.
 
-**Current version:** see [`VERSION`](VERSION) (v5.3.0).
+**Current version:** see [`VERSION`](VERSION) (v5.4.0).
 
 ## Run it
 
@@ -50,11 +50,12 @@ Already have the repo? Double-click **Start.bat**.
 Every GitHub Release includes `PC-Maintenance-Kit-vX.Y.Z.zip` and `PC-Maintenance-Kit-vX.Y.Z.zip.sha256`.
 
 ```powershell
-$zip = "$env:USERPROFILE\Downloads\PC-Maintenance-Kit-v5.3.0.zip"
+$zip = "$env:USERPROFILE\Downloads\PC-Maintenance-Kit-v5.4.0.zip"
 $want = (Get-Content "$zip.sha256" -Raw)
 if ($want -notmatch '([A-Fa-f0-9]{64})') { throw 'Checksum file is missing a hash.' }
-$got = (Get-FileHash $zip -Algorithm SHA256).Hash
-if ($got -ne $Matches[1]) { throw "SHA256 mismatch. expected=$($Matches[1]) actual=$got" }
+$got = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+$wantHash = $Matches[1].ToLowerInvariant()
+if ($got -ne $wantHash) { throw "SHA256 mismatch. expected=$wantHash actual=$got" }
 Unblock-File $zip
 Write-Host "Checksum OK"
 ```
@@ -111,7 +112,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-Release.ps1
 Version comes from the `VERSION` file. Passing `-Version` is allowed only when it matches
 `VERSION`, so the ZIP name can never disagree with the version inside it.
 
-Output: `dist\PC-Maintenance-Kit-v5.3.0.zip` and `dist\PC-Maintenance-Kit-v5.3.0.zip.sha256`
+Output: `dist\PC-Maintenance-Kit-v5.4.0.zip` and `dist\PC-Maintenance-Kit-v5.4.0.zip.sha256`
 
 ## Requirements
 

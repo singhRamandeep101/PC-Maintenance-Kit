@@ -43,20 +43,74 @@ function Disable-AmdReLive {
     return $true
 }
 
-function Enable-UltimatePerformancePlan {
-    try {
-        powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 2>$null | Out-Null
-    } catch { }
-    $out = powercfg /list 2>$null | Out-String
-    if ($out -match '([0-9a-fA-F-]{36}).*\(Ultimate Performance\)') {
-        powercfg /setactive $Matches[1] | Out-Null
-        $Script:PowerPlanCache = $null
-        return $true
+function Get-PreviousPowerPlanPath {
+    $dir = Join-Path $env:LOCALAPPDATA 'PC-Maintenance-Kit'
+    return (Join-Path $dir 'previous-power-plan.txt')
+}
+
+function Save-PreviousPowerPlan {
+    param([string]$Guid)
+    if ($Guid -notmatch '^[0-9a-fA-F-]{36}$') { return }
+    $path = Get-PreviousPowerPlanPath
+    # Keep the plan we left the first time. Later Ultimate switches must not overwrite it.
+    if (Test-Path -LiteralPath $path) { return }
+    $dir = Split-Path -Parent $path
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
-    $high = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
-    powercfg /setactive $high 2>$null | Out-Null
+    Set-Content -LiteralPath $path -Value $Guid.Trim() -Encoding ASCII
+}
+
+function Restore-PreviousPowerPlan {
+    $path = Get-PreviousPowerPlanPath
+    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    $guid = (Get-Content -LiteralPath $path -Raw).Trim()
+    if ($guid -notmatch '^[0-9a-fA-F-]{36}$') { return $false }
+    powercfg /setactive $guid 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    Remove-Item -LiteralPath $path -Force -EA SilentlyContinue
     $Script:PowerPlanCache = $null
-    return $false
+    $Script:PowerPlanCacheUtc = [datetime]::MinValue
+    return $true
+}
+
+function Enable-UltimatePerformancePlan {
+    $ultimateTemplate = 'e9a42b02-d5df-448d-aa00-03f14749eb61'
+    $high = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
+    $out = ''
+    try { $out = powercfg /list 2>$null | Out-String } catch { $out = '' }
+
+    $activeGuid = $null
+    if ($out -match '(?m)Power Scheme GUID:\s*([0-9a-fA-F-]{36})\s+\([^\r\n]*\)\s*\*') {
+        $activeGuid = $Matches[1]
+    }
+
+    $existing = $null
+    foreach ($line in ($out -split "`r?`n")) {
+        if ($line -match '([0-9a-fA-F-]{36}).*\(Ultimate Performance\)') {
+            $existing = $Matches[1]
+            break
+        }
+    }
+    if (-not $existing) {
+        try { powercfg -duplicatescheme $ultimateTemplate 2>$null | Out-Null } catch { }
+        try { $out = powercfg /list 2>$null | Out-String } catch { $out = '' }
+        foreach ($line in ($out -split "`r?`n")) {
+            if ($line -match '([0-9a-fA-F-]{36}).*\(Ultimate Performance\)') {
+                $existing = $Matches[1]
+                break
+            }
+        }
+    }
+
+    $target = if ($existing) { $existing } else { $high }
+    if ($activeGuid -and ($activeGuid -ne $target)) {
+        Save-PreviousPowerPlan -Guid $activeGuid
+    }
+    try { powercfg /setactive $target 2>$null | Out-Null } catch { }
+    $Script:PowerPlanCache = $null
+    $Script:PowerPlanCacheUtc = [datetime]::MinValue
+    return [bool]$existing
 }
 
 function Get-ActivePowerPlanName {

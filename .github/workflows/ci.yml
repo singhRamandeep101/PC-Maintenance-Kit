@@ -83,14 +83,17 @@ jobs:
               throw "Staged payload is missing $required"
             }
           }
-          # If signing secrets were supplied, the payload must actually be signed
+          # If signing secrets were supplied, every script in the payload must be signed
           if ($env:PCMK_SIGN_PFX_BASE64) {
-            $entry = Join-Path $stage 'PC-Maintenance.ps1'
-            $sig = Get-AuthenticodeSignature -FilePath $entry
-            if ($sig.Status -ne 'Valid') {
-              throw "Signing secrets were present but $entry is $($sig.Status)"
+            $signed = @(Get-ChildItem -LiteralPath $stage -Recurse -Filter *.ps1 -File)
+            if ($signed.Count -lt 1) { throw "Signing secrets were present but no scripts were staged" }
+            foreach ($f in $signed) {
+              $sig = Get-AuthenticodeSignature -FilePath $f.FullName
+              if ($sig.Status -ne 'Valid') {
+                throw "Signing secrets were present but $($f.Name) is $($sig.Status)"
+              }
             }
-            Write-Host "Authenticode verified"
+            Write-Host ("Authenticode verified on {0} scripts" -f $signed.Count)
           }
           Write-Host ("SHA256 OK {0}  {1}" -f $actual, $zip.Name)
 
