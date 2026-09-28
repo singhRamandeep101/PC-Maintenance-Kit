@@ -65,10 +65,18 @@ function Apply-ScheduledCareFlags {
     Reset-MaintenanceFlags
     $Script:DoCleanup = $true
     $Script:DoRestorePoint = [bool]$s.HomeRestore
-    $Script:DoShaderCleanup = [bool]$s.HomeShader
-    $Script:DoGamingOptimize = [bool]$s.HomeGaming
-    $Script:DoWinUpdate = [bool]$s.HomeWU
-    $Script:DoWinget = [bool]$s.HomeWinget
+    # Home WU/winget still drive the button on the Home page. The hidden weekly
+    # task installs them only when ScheduleUpdates was turned on as well.
+    $allowUpdates = $false
+    if ($null -ne $s.ScheduleUpdates) { $allowUpdates = [bool]$s.ScheduleUpdates }
+    $Script:DoWinUpdate = $allowUpdates -and [bool]$s.HomeWU
+    $Script:DoWinget = $allowUpdates -and [bool]$s.HomeWinget
+    # Home shader and gaming boxes are for the button you click. The hidden
+    # Sunday task applies them only when ScheduleGaming was turned on as well.
+    $allowGaming = $false
+    if ($null -ne $s.ScheduleGaming) { $allowGaming = [bool]$s.ScheduleGaming }
+    $Script:DoShaderCleanup = $allowGaming -and [bool]$s.HomeShader
+    $Script:DoGamingOptimize = $allowGaming -and [bool]$s.HomeGaming
     $Script:DoAmd = $false
     $Script:DoRepair = $false
     $Script:DoWuCacheWipe = $false
@@ -121,7 +129,13 @@ function Enable-WeeklyCareSchedule {
     }
 
     $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $arg = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptPath`" -Mode Scheduled"
+    $kitRoot = Split-Path -Parent $ScriptPath
+    Get-ChildItem -LiteralPath $kitRoot -Recurse -Filter *.ps1 -EA SilentlyContinue | ForEach-Object {
+        try { Unblock-File -LiteralPath $_.FullName -EA Stop } catch {
+            Write-Warn ("Could not clear the download mark on {0}: {1}" -f $_.Name, $_.Exception.Message)
+        }
+    }
+    $arg = "-NoProfile -ExecutionPolicy RemoteSigned -WindowStyle Hidden -File `"$ScriptPath`" -Mode Scheduled"
     $action = New-ScheduledTaskAction -Execute $psExe -Argument $arg
     # Sundays at 18:00 local time
     $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 6:00PM
@@ -174,5 +188,9 @@ function Update-GuiCareScheduleStatus {
             $on = Test-WeeklyCareScheduled -Task $task
             if ($chk.Checked -ne $on) { $chk.Checked = $on }
         } catch { }
+    }
+    $last = $Script:GuiControls.LblLastScheduledRun
+    if ($last) {
+        try { $last.Text = Get-LastScheduledRunSummary } catch { $last.Text = 'No weekly run recorded yet.' }
     }
 }

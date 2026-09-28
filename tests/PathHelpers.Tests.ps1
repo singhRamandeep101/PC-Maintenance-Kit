@@ -20,6 +20,80 @@ function Assert-True($cond, $msg) {
     else { Write-Host "FAIL: $msg" -ForegroundColor Red; $script:failed++ }
 }
 
+function Invoke-GuiLayoutHunts {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    . (Join-Path $Root 'lib\Gaming.ps1')
+    . (Join-Path $Root 'lib\Device.ps1')
+    . (Join-Path $Root 'lib\Score.ps1')
+    . (Join-Path $Root 'lib\Care.ps1')
+    . (Join-Path $Root 'lib\Gui.ps1')
+    $Script:Theme = Get-GuiTheme
+    $form = New-Object System.Windows.Forms.Form
+    $form.FormBorderStyle = 'None'
+    $form.StartPosition = 'Manual'
+    $form.Location = New-Object System.Drawing.Point(-4000, -4000)
+    $form.ClientSize = New-Object System.Drawing.Size(1000, 860)
+    $form.ShowInTaskbar = $false
+    $pages = @{}
+    foreach ($name in @('Home','Cleanup','Updates','Gaming','Repair','Device')) {
+        $page = New-Object System.Windows.Forms.Panel
+        $page.Dock = 'Fill'
+        $form.Controls.Add($page)
+        $pages[$name] = $page
+    }
+    $homePage = Add-GuiHomePage -Page $pages.Home -Theme $Script:Theme
+    $clean = Add-GuiCleanupPage -Page $pages.Cleanup -Theme $Script:Theme
+    $upd = Add-GuiUpdatesPage -Page $pages.Updates -Theme $Script:Theme
+    $game = Add-GuiGamingPage -Page $pages.Gaming -Theme $Script:Theme
+    $repair = Add-GuiRepairPage -Page $pages.Repair -Theme $Script:Theme
+    $device = Add-GuiDevicePage -Page $pages.Device -Theme $Script:Theme
+    foreach ($k in @('BtnWeekly','ChkHomeWU','ChkScheduleWeekly','ChkScheduleUpdates','ChkScheduleGaming','LblLastScheduledRun','HomeFixesVal','CpuMain')) {
+        Assert-True ($homePage.Contains($k) -and $null -ne $homePage[$k]) "Home returns $k"
+    }
+    Assert-True (-not $homePage.ChkScheduleUpdates.Checked) 'Weekly task update opt-in defaults off'
+    foreach ($k in @('BtnCleanup','BtnPreview','DaysNum','LblCleanupLive','ChkWuCache')) {
+        Assert-True ($clean.Contains($k) -and $null -ne $clean[$k]) "Cleanup returns $k"
+    }
+    foreach ($k in @('BtnUpdates','ChkUpdWU','ChkUpdWinget','LblUpdatesLive')) {
+        Assert-True ($upd.Contains($k) -and $null -ne $upd[$k]) "Updates returns $k"
+    }
+    foreach ($k in @('BtnGamingOpt','OptFixesVal','OptGradeLetter','OptStatusPill')) {
+        Assert-True ($game.Contains($k) -and $null -ne $game[$k]) "Gaming returns $k"
+    }
+    foreach ($k in @('BtnRepair','ChkRepRestore','LblRepairLive')) {
+        Assert-True ($repair.Contains($k) -and $null -ne $repair[$k]) "Repair returns $k"
+    }
+    foreach ($k in @('BtnRestartNow','DevCpu','DevRamTip','DevRebootPill')) {
+        Assert-True ($device.Contains($k) -and $null -ne $device[$k]) "Device returns $k"
+    }
+    $form.Show()
+    [System.Windows.Forms.Application]::DoEvents()
+    $fixes = $homePage.HomeFixesVal
+    $fixes.Text = "1. Startup apps - 14 apps at sign-in`r`n2. GPU driver - two versions behind`r`n3. Memory - single channel holds 1% lows back"
+    [System.Windows.Forms.Application]::DoEvents()
+    $card = $fixes.Parent
+    $fits = ($fixes.Bottom + $fixes.Margin.Bottom) -le ($card.ClientSize.Height + 8)
+    Assert-True ($fits -and $fixes.Width -gt 40) 'Home top fixes stay inside the card'
+    $tip = $device.DevRamTip
+    $tip.Text = 'You have 1 stick (CMK32GX5M1B5600C36). Buy a matching second stick of the same model for dual-channel. Search: CMK32GX5M1B5600C36.'
+    [System.Windows.Forms.Application]::DoEvents()
+    $tipCard = $tip.Parent
+    $tipFits = ($tip.Bottom + $tip.Margin.Bottom) -le ($tipCard.ClientSize.Height + 8)
+    Assert-True ($tipFits -and $tip.Width -gt 40) 'Device RAM tip stays inside the card'
+    Assert-True ($repair.BtnRepair.BackColor.ToArgb() -eq $Script:Theme.Danger.ToArgb()) 'DISM button stays the danger color'
+    Assert-True ($device.BtnRestartNow.ForeColor.ToArgb() -eq [System.Drawing.Color]::FromArgb(248, 113, 113).ToArgb()) 'Restart text stays red'
+    $form.Close()
+    $form.Dispose()
+}
+
+if ($env:PCMK_GUI_HUNT -eq '1') {
+    Invoke-GuiLayoutHunts
+    if ($failed -gt 0) { exit 1 }
+    Write-Host 'GUI layout hunts passed.' -ForegroundColor Green
+    exit 0
+}
+
 $versionFile = Join-Path $Root 'VERSION'
 Assert-True (Test-Path -LiteralPath $versionFile) 'VERSION file exists'
 $fileVersion = (Get-Content -LiteralPath $versionFile -Raw).Trim()
@@ -180,6 +254,8 @@ Remove-Item -LiteralPath $outside -Recurse -Force -EA SilentlyContinue
 $settings = Get-DefaultGuiSettings
 Assert-True ($settings.HomeWU -eq $false) 'Default HomeWU is false'
 Assert-True ($settings.HomeWinget -eq $false) 'Default HomeWinget is false'
+Assert-True ($settings.ScheduleUpdates -eq $false) 'Default ScheduleUpdates is false'
+Assert-True ($settings.ScheduleGaming -eq $false) 'Default ScheduleGaming is false'
 Assert-True ($settings.CleanWuCache -eq $false) 'Default CleanWuCache is false'
 Assert-True ($settings.CleanEpic -eq $false) 'Default CleanEpic is false'
 
@@ -485,6 +561,11 @@ Assert-True ($null -ne $optScore.TopFixes) 'Score has TopFixes'
 Assert-True ($null -ne $optScore.HardwareReadiness) 'Score has HardwareReadiness'
 $weightSum = ($optScore.Categories | Measure-Object -Property Weight -Sum).Sum
 Assert-True ([math]::Abs($weightSum - 1.0) -lt 0.001) 'Category weights sum to 1.0'
+$byName = @{}
+foreach ($c in @($optScore.Categories)) { $byName[$c.Name] = [double]$c.Weight }
+$actionable = $byName.Power + $byName.GamingFeatures + $byName.Background + $byName.Hygiene
+$hardware = $byName.Storage + $byName.Memory
+Assert-True ($actionable -gt $hardware) 'Settings you can change outweigh disk type and RAM'
 $hygCat = @($optScore.Categories | Where-Object { $_.Name -eq 'Hygiene' } | Select-Object -First 1)
 Assert-True ($null -ne $hygCat) 'Score includes Hygiene category'
 if (-not $hardAny) {
@@ -625,6 +706,12 @@ Assert-True ($coreRaw -match 'EnumerateFiles') 'Cleanup streams files via Enumer
 Assert-True ($coreRaw -match 'Invoke-ContainedTreeWalk') 'Cleanup walks without following reparse points'
 Assert-True ($coreRaw -notmatch 'looksClean') 'DISM success is not inferred from the log'
 Assert-True ($coreRaw -match 'left as-is') 'Stopped update services are left alone outside an update run'
+Assert-True ($coreRaw -match 'LeaveRunning') 'DISM and SFC are marked to keep running on Stop'
+Assert-True ($coreRaw -match 'Stop will not kill DISM') 'Stop explains that DISM is left running'
+Assert-True ($coreRaw -notmatch '\.Kill\(') 'Stop does not kill tracked processes'
+Assert-True ($coreRaw -match 'winget upgrade" -TimeoutSec 3600 -LeaveRunning') 'winget upgrade is left running on Stop'
+Assert-True ($coreRaw -match 'Installing Windows Updates" -TimeoutSec 3600 -Sta -LeaveRunning') 'Windows Update install is left running on Stop'
+Assert-True ($coreRaw -notmatch 'DISM cancelled') 'Stop no longer reports DISM as cancelled'
 Assert-True ($guiRaw -match 'CleanupPreviewCache') 'Gui caches recent cleanup previews'
 Assert-True ($guiRaw -match 'add_ThreadException') 'Gui installs an unhandled-exception perimeter'
 # Restart must never fire from a DoEvents-delivered click during a job
@@ -650,6 +737,25 @@ Assert-True ($presets.Gamer.HomeWU -eq $false) 'Gamer preset leaves WU off'
 Assert-True ($presets.Quiet.HomeGaming -eq $false) 'Quiet preset leaves gaming opts off'
 Assert-True ($presets.Full.HomeWinget -eq $true) 'Full preset enables winget'
 Assert-True ($Script:WeeklyCareTaskName -match 'Weekly') 'Weekly care task name is set'
+$schedOff = '{"HomeRestore":true,"HomeShader":true,"HomeGaming":true,"HomeWU":true,"HomeWinget":true,"ScheduleUpdates":false,"TempOlderDays":2}'
+Set-Content -LiteralPath $settingsProbe -Value $schedOff -Encoding ASCII
+Apply-ScheduledCareFlags
+Assert-True ($Script:DoCleanup) 'Scheduled run still cleans'
+Assert-True (-not $Script:DoWinUpdate) 'Scheduled run leaves Windows Update off unless ScheduleUpdates is on'
+Assert-True (-not $Script:DoWinget) 'Scheduled run leaves winget off unless ScheduleUpdates is on'
+Assert-True (-not $Script:DoShaderCleanup) 'Scheduled run leaves shader cleanup off unless ScheduleGaming is on'
+Assert-True (-not $Script:DoGamingOptimize) 'Scheduled run leaves gaming settings off unless ScheduleGaming is on'
+Assert-True (-not $Script:DoRepair) 'Scheduled run never repairs'
+$schedOn = '{"HomeRestore":true,"HomeShader":true,"HomeGaming":true,"HomeWU":true,"HomeWinget":true,"ScheduleUpdates":true,"ScheduleGaming":true,"TempOlderDays":2}'
+Set-Content -LiteralPath $settingsProbe -Value $schedOn -Encoding ASCII
+Apply-ScheduledCareFlags
+Assert-True ($Script:DoWinUpdate) 'Scheduled run installs Windows Update when ScheduleUpdates is on'
+Assert-True ($Script:DoWinget) 'Scheduled run installs winget when ScheduleUpdates is on'
+Assert-True ($Script:DoShaderCleanup) 'Scheduled run clears shaders when ScheduleGaming is on'
+Assert-True ($Script:DoGamingOptimize) 'Scheduled run applies gaming settings when ScheduleGaming is on'
+$careRaw = Get-Content -LiteralPath (Join-Path $Root 'lib\Care.ps1') -Raw
+Assert-True ($careRaw -match 'ExecutionPolicy RemoteSigned') 'Weekly task uses RemoteSigned'
+Assert-True ($careRaw -match 'Unblock-File') 'Weekly task clears the download mark'
 
 $pmRaw = Get-Content -LiteralPath (Join-Path $Root 'PC-Maintenance.ps1') -Raw
 Assert-True ($pmRaw -match "ValidateSet\([^\)]*'Scheduled'") 'Entry script accepts -Mode Scheduled'
@@ -662,7 +768,7 @@ Assert-True ($guiRaw2 -match 'Enable-GuiDpiAwareness') 'GUI enables DPI awarenes
 Assert-True ($guiRaw2 -match 'AutoScaleMode]::Dpi') 'Form uses DPI autoscaling'
 Assert-True ($guiRaw2 -match 'DeviceDpi') 'Minimum window size follows DPI'
 Assert-True ($guiRaw2 -match 'UseVisualStyleBackColor = \$false') 'Checkboxes paint on the panel instead of the system background'
-Assert-True ($guiRaw2 -match 'FromArgb\(186, 198, 214\)') 'Muted text is light enough to read on the cards'
+Assert-True ($guiRaw2 -match 'FromArgb\(165, 165, 197\)') 'Muted text is light enough to read on the cards'
 Assert-True ($coreRaw -match 'FromArgb\(176, 190, 208\)') 'Log gray is light enough to read on the dark log'
 Assert-True ($guiRaw2 -match 'GuiPages\.ps1') 'GUI loads GuiPages module'
 Assert-True ($guiRaw2 -match 'BtnPresetGamer') 'GUI wires care presets'
@@ -698,6 +804,17 @@ $h = (Get-FileHash -LiteralPath $hashProbe -Algorithm SHA256).Hash.ToLowerInvari
 $sumLine = "{0}  pcmk-hash-probe.txt" -f $h
 Assert-True ($sumLine -match '([A-Fa-f0-9]{64})' -and $Matches[1].ToLowerInvariant() -eq $h) 'SHA256 checksum line format'
 Remove-Item -LiteralPath $hashProbe -Force -EA SilentlyContinue
+
+$apartment = [System.Threading.Thread]::CurrentThread.GetApartmentState()
+if ($apartment -eq 'STA') {
+    Invoke-GuiLayoutHunts
+} else {
+    $prevHunt = $env:PCMK_GUI_HUNT
+    $env:PCMK_GUI_HUNT = '1'
+    & powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath
+    if ($LASTEXITCODE -ne 0) { $script:failed++ }
+    if ($null -eq $prevHunt) { Remove-Item Env:PCMK_GUI_HUNT -ErrorAction SilentlyContinue } else { $env:PCMK_GUI_HUNT = $prevHunt }
+}
 
 if ($failed -gt 0) {
     Write-Host "`n$failed test(s) failed." -ForegroundColor Red

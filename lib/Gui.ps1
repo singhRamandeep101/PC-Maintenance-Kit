@@ -16,24 +16,26 @@ function Enable-DoubleBuffer($Control) {
 function Get-GuiTheme {
     # One slate family plus one cyan accent. Muted text stays light enough to read
     # on Panel; it used to be a blue-gray that disappeared into the navy cards.
+    # Palette from the PC Maintenance Figma file: slate cards, cyan accent, green status.
     return @{
-        Bg        = [System.Drawing.Color]::FromArgb(14, 18, 24)
-        Header    = [System.Drawing.Color]::FromArgb(18, 24, 32)
-        Panel     = [System.Drawing.Color]::FromArgb(28, 36, 46)
-        PanelAlt  = [System.Drawing.Color]::FromArgb(40, 52, 66)
-        Border    = [System.Drawing.Color]::FromArgb(92, 112, 132)
-        Accent    = [System.Drawing.Color]::FromArgb(72, 214, 232)
-        Accent2   = [System.Drawing.Color]::FromArgb(36, 156, 186)
-        Cta       = [System.Drawing.Color]::FromArgb(20, 104, 184)
-        CtaHover  = [System.Drawing.Color]::FromArgb(36, 128, 208)
-        Success   = [System.Drawing.Color]::FromArgb(72, 214, 160)
-        Warn      = [System.Drawing.Color]::FromArgb(245, 186, 72)
-        Danger    = [System.Drawing.Color]::FromArgb(255, 132, 144)
-        Text      = [System.Drawing.Color]::FromArgb(244, 247, 251)
-        Muted     = [System.Drawing.Color]::FromArgb(186, 198, 214)
-        LogBg     = [System.Drawing.Color]::FromArgb(12, 16, 22)
-        BtnGhost  = [System.Drawing.Color]::FromArgb(32, 42, 54)
-        IconBox   = [System.Drawing.Color]::FromArgb(22, 32, 42)
+        Bg          = [System.Drawing.Color]::FromArgb(15, 15, 27)
+        Header      = [System.Drawing.Color]::FromArgb(20, 20, 36)
+        Panel       = [System.Drawing.Color]::FromArgb(26, 26, 46)
+        PanelAlt    = [System.Drawing.Color]::FromArgb(20, 20, 36)
+        Border      = [System.Drawing.Color]::FromArgb(37, 37, 66)
+        GhostBorder = [System.Drawing.Color]::FromArgb(62, 62, 104)
+        Accent      = [System.Drawing.Color]::FromArgb(0, 180, 216)
+        Accent2     = [System.Drawing.Color]::FromArgb(0, 119, 182)
+        Cta         = [System.Drawing.Color]::FromArgb(0, 180, 216)
+        CtaHover    = [System.Drawing.Color]::FromArgb(0, 200, 230)
+        Success     = [System.Drawing.Color]::FromArgb(34, 197, 94)
+        Warn        = [System.Drawing.Color]::FromArgb(245, 158, 11)
+        Danger      = [System.Drawing.Color]::FromArgb(239, 68, 68)
+        Text        = [System.Drawing.Color]::FromArgb(255, 255, 255)
+        Muted       = [System.Drawing.Color]::FromArgb(165, 165, 197)
+        LogBg       = [System.Drawing.Color]::FromArgb(12, 12, 22)
+        BtnGhost    = [System.Drawing.Color]::FromArgb(20, 20, 36)
+        IconBox     = [System.Drawing.Color]::FromArgb(28, 28, 48)
     }
 }
 
@@ -226,8 +228,8 @@ function New-PremiumButton {
         }
         'Primary' {
             $b.BackColor = $t.Accent
-            $b.ForeColor = [System.Drawing.Color]::FromArgb(8, 18, 24)
-            $b.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(140, 230, 242)
+            $b.ForeColor = [System.Drawing.Color]::White
+            $b.FlatAppearance.MouseOverBackColor = $t.CtaHover
             $b.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
         }
         'Ghost' {
@@ -236,9 +238,9 @@ function New-PremiumButton {
             $b.FlatAppearance.MouseOverBackColor = $t.PanelAlt
         }
         'Danger' {
-            $b.BackColor = [System.Drawing.Color]::FromArgb(92, 32, 44)
-            $b.ForeColor = [System.Drawing.Color]::FromArgb(255, 214, 218)
-            $b.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(124, 42, 56)
+            $b.BackColor = $t.Danger
+            $b.ForeColor = [System.Drawing.Color]::White
+            $b.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(220, 60, 60)
         }
         'Muted' {
             $b.BackColor = $t.PanelAlt
@@ -268,7 +270,9 @@ function New-PremiumButton {
                 [void]$path2.AddArc(($w - $r2 - 1), ($h - $r2 - 1), $r2, $r2, 0, 90)
                 [void]$path2.AddArc(0, ($h - $r2 - 1), $r2, $r2, 90, 90)
                 $path2.CloseFigure()
-                $pen2 = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(120, $accent.R, $accent.G, $accent.B)), 1
+                $edge = $Script:Theme.GhostBorder
+                if (-not $edge) { $edge = $accent }
+                $pen2 = New-Object System.Drawing.Pen $edge, 1
                 $g.DrawPath($pen2, $path2)
                 $pen2.Dispose()
                 $path2.Dispose()
@@ -544,7 +548,7 @@ function Set-GuiBusy([bool]$Busy) {
         'BtnFixPower','BtnRestorePower','BtnCopyRamTip','BtnRestartNow','BtnOpenStorage',
         'BtnDiscordOff','BtnRefreshGame','BtnRefreshHome','BtnAmd','BtnNv','BtnRestoreOnly',
         'BtnCheckUpdate','BtnCli','BtnQuit','BtnScanScore','BtnApplyOptFixes','BtnFixMyPc',
-        'BtnPresetGamer','BtnPresetQuiet','BtnPresetFull','ChkScheduleWeekly'
+        'BtnPresetGamer','BtnPresetQuiet','BtnPresetFull','ChkScheduleWeekly','ChkScheduleUpdates','ChkScheduleGaming'
     )
     foreach ($n in $runBtns) {
         $b = $Script:GuiControls.$n
@@ -580,7 +584,7 @@ function Set-PageLiveStatus {
     $map = [ordered]@{
         Cleanup = @{ Ctrl = 'LblCleanupLive'; Idle = 'Ready - preview sizes or run cleanup.' }
         Updates = @{ Ctrl = 'LblUpdatesLive'; Idle = 'Ready - Windows Update and winget when you need them.' }
-        Repair  = @{ Ctrl = 'LblRepairLive'; Idle = 'Ready - only run when Windows feels broken.' }
+        Repair  = @{ Ctrl = 'LblRepairLive'; Idle = 'No repair running' }
     }
     $target = $Script:LiveStatusTarget
     foreach ($page in @($map.Keys)) {
@@ -637,25 +641,42 @@ function Invoke-GuiPanelsRefresh {
         }
         # Score refresh pulls a fresh device summary once; then bind all panels from cache.
         try { $null = Get-GamingOptimizationScore -Refresh } catch {
-            try { $null = Get-DeviceSummary -Refresh } catch { }
+            Write-Warn ("Could not refresh the score: {0}" -f $_.Exception.Message)
+            try { $null = Get-DeviceSummary -Refresh } catch {
+                Write-Warn ("Could not read this PC: {0}" -f $_.Exception.Message)
+            }
         }
         Pump-Ui
     } elseif ($Mode -eq 'Space') {
         # Free space, reboot, and power plan only. Do not reload CPU/GPU/disk.
         if ($Script:DeviceSummaryCache) {
-            try { $Script:DeviceSummaryCache.FreeGb = Get-CFreeGB -Refresh } catch { }
-            try { $Script:DeviceSummaryCache.RebootPending = Test-RebootPending -Refresh } catch { }
-            try { $Script:DeviceSummaryCache.PowerPlan = Get-ActivePowerPlanName -Refresh } catch { }
+            try { $Script:DeviceSummaryCache.FreeGb = Get-CFreeGB -Refresh } catch {
+                Write-Warn ("Could not read free space: {0}" -f $_.Exception.Message)
+            }
+            try { $Script:DeviceSummaryCache.RebootPending = Test-RebootPending -Refresh } catch {
+                Write-Warn ("Could not read restart status: {0}" -f $_.Exception.Message)
+            }
+            try { $Script:DeviceSummaryCache.PowerPlan = Get-ActivePowerPlanName -Refresh } catch {
+                Write-Warn ("Could not read the power plan: {0}" -f $_.Exception.Message)
+            }
         }
         $Script:OptimizationScoreCache = $null
-        try { $null = Get-GamingOptimizationScore } catch { }
+        try { $null = Get-GamingOptimizationScore } catch {
+            Write-Warn ("Could not refresh the score: {0}" -f $_.Exception.Message)
+        }
         Pump-Ui
     }
-    try { Update-GuiHomeSummary } catch { }
+    try { Update-GuiHomeSummary } catch {
+        Write-Warn ("Could not refresh Home: {0}" -f $_.Exception.Message)
+    }
     Pump-Ui
-    try { Update-GuiDevicePanel } catch { }
+    try { Update-GuiDevicePanel } catch {
+        Write-Warn ("Could not refresh Device: {0}" -f $_.Exception.Message)
+    }
     Pump-Ui
-    try { Update-GuiGamingStatus -SkipScore } catch { }
+    try { Update-GuiGamingStatus -SkipScore } catch {
+        Write-Warn ("Could not refresh Gaming: {0}" -f $_.Exception.Message)
+    }
     if ($DoneText) {
         Set-UiStatusText $DoneText
         Update-GuiStatusBar -JobText $DoneText
@@ -1012,14 +1033,63 @@ function Apply-GuiRepairFlags {
     $Script:DoRestorePoint = [bool]$Controls.ChkRepRestore.Checked
 }
 
+function Get-ScoreLetter([string]$Grade) {
+    switch ($Grade) {
+        'Excellent' { return 'A' }
+        'Good' { return 'B' }
+        'Needs work' { return 'C' }
+        default { return 'D' }
+    }
+}
+
+function Set-GuiLabelText($Name, [string]$Text) {
+    if (-not $Script:GuiControls) { return }
+    $ctrl = $Script:GuiControls.$Name
+    if ($ctrl) { $ctrl.Text = $Text }
+}
+
 function Update-GuiDevicePanel {
     $box = $Script:GuiControls.DeviceSummary
-    if (-not $box) { return }
     try {
-        $box.Text = Format-DeviceSummaryText
+        if ($box) { $box.Text = Format-DeviceSummaryText }
     } catch {
-        $box.Text = "Unavailable"
+        if ($box) { $box.Text = "Unavailable" }
     }
+    try {
+        $s = Get-DeviceSummary
+    } catch {
+        return
+    }
+    $reboot = if ($s.RebootPending) { 'Yes' } else { 'No' }
+    $rebootPill = if ($s.RebootPending) { 'Restart recommended' } else { 'No reboot pending' }
+    $disk = [string]$s.DiskName
+    if ($s.DiskHealth -and $s.DiskHealth -ne 'Unknown') { $disk = "$disk  [$($s.DiskHealth)]" }
+    $trim = [string]$s.TrimInfo
+    if ($trim -match 'SSD') { $trim = 'SSD detected' }
+    elseif ($trim -match 'HDD') { $trim = 'HDD' }
+    $cpuShort = ([string]$s.Cpu -replace 'Intel(\(R\))?|Core\(TM\)|CPU|Processor|NVIDIA|GeForce', '')
+    $cpuShort = ($cpuShort -replace '\s+', ' ').Trim()
+    $gpuShort = ([string]$s.Gpu -replace 'NVIDIA|GeForce', '')
+    $gpuShort = ($gpuShort -replace '\s+', ' ').Trim()
+    if ($cpuShort.Length -gt 24) { $cpuShort = $cpuShort.Substring(0, 24).Trim() }
+    if ($gpuShort.Length -gt 24) { $gpuShort = $gpuShort.Substring(0, 24).Trim() }
+    Set-GuiLabelText DevCpu $s.Cpu
+    Set-GuiLabelText DevGpu $s.Gpu
+    Set-GuiLabelText DevRam ("{0:N1} GB ({1} sticks)" -f $s.RamGb, $s.RamSticks)
+    Set-GuiLabelText DevChannels $s.RamChannels
+    Set-GuiLabelText DevDisk $disk
+    Set-GuiLabelText DevTrim $trim
+    Set-GuiLabelText DevFree ("{0:N0} GB" -f $s.FreeGb)
+    Set-GuiLabelText DevPower $s.PowerPlan
+    Set-GuiLabelText DevReboot $reboot
+    Set-GuiLabelText DevRebootPill $rebootPill
+    $rebootPillCtrl = $Script:GuiControls.DevRebootPill
+    if ($rebootPillCtrl) {
+        $rebootPillCtrl.ForeColor = if ($s.RebootPending) { $Script:Theme.Warn } else { $Script:Theme.Success }
+    }
+    $dot = [char]0x00B7
+    Set-GuiLabelText DevChip ("{0}  {1}  {2}" -f $cpuShort, $dot, $gpuShort)
+    try { Set-GuiLabelText DevRamTip (Get-RamUpgradeTip) } catch { }
 }
 
 function Update-GuiOptimizationScore {
@@ -1037,10 +1107,17 @@ function Update-GuiOptimizationScore {
             $lm = $Script:GuiControls.($pair.Limiter)
             $fx = $Script:GuiControls.($pair.Fixes)
             if ($sc) { $sc.Text = "--"; $sc.ForeColor = $t.Muted }
-            if ($gr) { $gr.Text = "Score unavailable"; $gr.ForeColor = $t.Muted }
+            if ($gr) {
+                if ($pair.Score -eq 'OptScoreVal') { $gr.Text = "" } else { $gr.Text = "Score unavailable" }
+                $gr.ForeColor = $t.Muted
+            }
             if ($lm) { $lm.Text = "" }
             if ($fx) { $fx.Text = "" }
         }
+        Set-GuiLabelText OptGradeLetter '-'
+        Set-GuiLabelText DevGradeLetter '-'
+        Set-GuiLabelText OptStatusPill 'Score unavailable'
+        Set-GuiLabelText DevScoreLine 'Score unavailable'
     }
 
     try {
@@ -1052,7 +1129,7 @@ function Update-GuiOptimizationScore {
 
     $scoreColor = if ($score.Score -ge 70) { $t.Accent } elseif ($score.Score -ge 50) { $t.Warn } else { $t.Danger }
     $ready = $score.HardwareReadiness.Label
-    $limiterText = ("Limiter: {0}  |  Hardware: {1}" -f $score.BiggestLimiter, $ready)
+    $limiterText = ("Limiter: {0}  |  Hardware you own: {1}. Top fixes are the part you can change." -f $score.BiggestLimiter, $ready)
     $fixText = "No major fixes  -  setup looks tuned for gaming."
     if ($score.TopFixes -and $score.TopFixes.Count -gt 0) {
         $fixLines = New-Object System.Collections.Generic.List[string]
@@ -1075,14 +1152,23 @@ function Update-GuiOptimizationScore {
         $fx = $Script:GuiControls.($pair.Fixes)
         if ($sc) {
             $sc.Text = ("{0}" -f $score.Score)
-            $sc.ForeColor = $scoreColor
+            if ($pair.Score -eq 'OptScoreVal') { $sc.ForeColor = $t.Text } else { $sc.ForeColor = $scoreColor }
         }
         if ($gr) {
-            $gr.Text = ("/100  {0}" -f $score.Grade)
-            $gr.ForeColor = $t.Text
+            if ($pair.Score -eq 'OptScoreVal') {
+                $gr.Text = [string]$score.Grade
+                $gr.ForeColor = $t.Accent
+            } else {
+                $gr.Text = ("/100  {0}" -f $score.Grade)
+                $gr.ForeColor = $t.Text
+            }
         }
         if ($lm) {
-            $lm.Text = $limiterText
+            if ($pair.Score -eq 'OptScoreVal') {
+                $lm.Text = if ($score.BiggestLimiter) { [string]$score.BiggestLimiter } else { 'Setup looks tuned for gaming.' }
+            } else {
+                $lm.Text = $limiterText
+            }
             $lm.ForeColor = $t.Muted
         }
         if ($fx) {
@@ -1090,6 +1176,12 @@ function Update-GuiOptimizationScore {
             $fx.ForeColor = $t.Muted
         }
     }
+    $letter = Get-ScoreLetter $score.Grade
+    Set-GuiLabelText OptGradeLetter $letter
+    Set-GuiLabelText DevGradeLetter $letter
+    $dot = [char]0x00B7
+    Set-GuiLabelText OptStatusPill ("Score {0}  {1}  {2}" -f $score.Score, $dot, $score.Grade)
+    Set-GuiLabelText DevScoreLine ("{0} / 100  {1}  {2}" -f $score.Score, $dot, $score.Grade)
 }
 
 function Update-GuiGamingStatus {
@@ -1104,7 +1196,7 @@ function Update-GuiGamingStatus {
     function Set-StatusVal($ctrl, $text, $good) {
         if (-not $ctrl) { return }
         $ctrl.Text = $text
-        $ctrl.ForeColor = if ($good) { $t.Accent } else { $t.Text }
+        $ctrl.ForeColor = if ($good) { $t.Success } else { $t.Text }
     }
 
     $gmText = if ($null -eq $gm) { "Unknown" } elseif ($gm -eq 1) { "On" } else { "Off" }
@@ -1672,10 +1764,29 @@ function Show-MaintenanceGui {
         BtnPresetQuiet  = $merged.BtnPresetQuiet
         BtnPresetFull   = $merged.BtnPresetFull
         ChkScheduleWeekly = $merged.ChkScheduleWeekly
+        ChkScheduleUpdates = $merged.ChkScheduleUpdates
+        ChkScheduleGaming = $merged.ChkScheduleGaming
         LblScheduleStatus = $merged.LblScheduleStatus
+        LblLastScheduledRun = $merged.LblLastScheduledRun
         LblCleanupLive  = $merged.LblCleanupLive
         LblUpdatesLive  = $merged.LblUpdatesLive
         LblRepairLive   = $merged.LblRepairLive
+        OptGradeLetter  = $merged.OptGradeLetter
+        OptStatusPill   = $merged.OptStatusPill
+        DevGradeLetter  = $merged.DevGradeLetter
+        DevScoreLine    = $merged.DevScoreLine
+        DevCpu          = $merged.DevCpu
+        DevGpu          = $merged.DevGpu
+        DevRam          = $merged.DevRam
+        DevChannels     = $merged.DevChannels
+        DevDisk         = $merged.DevDisk
+        DevTrim         = $merged.DevTrim
+        DevFree         = $merged.DevFree
+        DevPower        = $merged.DevPower
+        DevReboot       = $merged.DevReboot
+        DevRebootPill   = $merged.DevRebootPill
+        DevChip         = $merged.DevChip
+        DevRamTip       = $merged.DevRamTip
     }
 
 
@@ -1943,8 +2054,16 @@ function Show-MaintenanceGui {
             $on = [bool]$Script:GuiControls.ChkScheduleWeekly.Checked
             try {
                 if ($on) {
+                    $updateNote = "Windows Update and winget stay off for this task unless you also turn on 'Weekly task may install updates'."
+                    if ($Script:GuiControls.ChkScheduleUpdates -and $Script:GuiControls.ChkScheduleUpdates.Checked -and ($Script:GuiControls.ChkHomeWU.Checked -or $Script:GuiControls.ChkHomeWinget.Checked)) {
+                        $updateNote = "Weekly task may install updates is on, and Windows Update or winget is checked. This task will install those while you are signed in, with nobody watching the screen."
+                    }
+                    $gameNote = "Shader cleanup and gaming settings stay off unless you also turn on 'Weekly task may clear shaders and apply gaming settings'."
+                    if ($Script:GuiControls.ChkScheduleGaming -and $Script:GuiControls.ChkScheduleGaming.Checked -and ($Script:GuiControls.ChkHomeShader.Checked -or $Script:GuiControls.ChkHomeGaming.Checked)) {
+                        $gameNote = "Weekly task may clear shaders and apply gaming settings is on. This task will do that while you are signed in."
+                    }
                     $r = Show-UiMessageBox `
-                        -Text "Schedule Weekly Full every Sunday at 6 PM?`n`nUses your current Home checkboxes (save them first).`nRuns elevated while you are signed in.`n`nYou can turn this off anytime." `
+                        -Text ("Schedule Weekly Full every Sunday at 6 PM?`n`nCleans temps and browser caches with your saved options.`nRuns with administrator rights, while you are signed in, so it can clean Windows temp.`n`n{0}`n`n{1}`n`nThe next time you open the app, Home shows what the last run did.`nYou can turn this off anytime." -f $updateNote, $gameNote) `
                         -Caption "Schedule Weekly Full" `
                         -Buttons ([System.Windows.Forms.MessageBoxButtons]::YesNo) `
                         -Icon ([System.Windows.Forms.MessageBoxIcon]::Question)

@@ -1,5 +1,27 @@
 # Changelog
 
+## 5.4.2
+
+Home, Cleanup, and Updates use the same cards as the rest of the window. The setup score weighs settings you can change more than the hardware you already own. Stop no longer kills DISM or SFC. The weekly task does not install updates unless you opt in, and Home shows what the last run did.
+
+- Setup score weights: power, game features, startup, and reboot outweigh disk type and RAM
+- Stop leaves a DISM or SFC process running until Windows finishes it, then skips the steps that have not started
+- The Sunday task installs Windows Update or winget only when "Weekly task may install updates" is on
+- Home shows the last scheduled run, including which flags it used
+- The one-line installer example points at the `v5.4.2` tag, which does not move after release
+- Window resize and score text no longer throw "Update-StackLayout is not recognized"
+- Stop leaves a winget upgrade or Windows Update install running until it finishes
+- The Sunday task does not clear shader caches or change gaming settings unless that box is on, and it starts with RemoteSigned after the download mark is cleared
+- Cleanup, disk probes, and saved settings report a failure instead of continuing with no message
+
+## 5.4.1
+
+Gaming, Repair, and Device use the same slate cards as the rest of the window: a score hero, live status, and the actions that were already on those tabs.
+
+- Gaming shows the score, letter grade, live Game Mode / DVR / power / Discord rows, and the top fixes
+- Repair shows what DISM + SFC will do before the confirm, and keeps the restore-point checkbox
+- Device lists the live hardware rows, the RAM tip, and the same storage, refresh, update, and restart actions
+
 ## 5.4.0
 
 Cleanup stays inside the folder it was given, scheduled runs no longer hang on dialogs, and the score stops awarding points for probes that failed.

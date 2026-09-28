@@ -22,6 +22,8 @@ $Script:LastPumpUtc = [datetime]::MinValue
 $Script:LastProgressPct = 0
 $Script:CancelRequested = $false
 $Script:TrackedProcesses = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
+# Process ids that Stop must not kill. DISM and SFC finish on their own.
+$Script:TrackedLeaveRunning = @{}
 $Script:UiShare = $null
 $Script:BgPowerShell = $null
 function Reset-MaintenanceFlags {
@@ -48,14 +50,25 @@ function Test-CancelRequested {
 function Request-MaintenanceCancel {
     $Script:CancelRequested = $true
     if ($Script:UiShare) { $Script:UiShare['CancelRequested'] = $true }
-    Write-Warn "Cancel requested - stopping after current step..."
+    $leftRunning = $false
     foreach ($p in @($Script:TrackedProcesses)) {
         try {
-            if ($p -and -not $p.HasExited) { $p.Kill() }
+            if (-not $p -or $p.HasExited) { continue }
+            if ($Script:TrackedLeaveRunning -and $Script:TrackedLeaveRunning.ContainsKey([string]$p.Id)) {
+                $leftRunning = $true
+            }
         } catch { }
     }
-    if ($Script:BgPowerShell) {
-        try { $Script:BgPowerShell.Stop() } catch { }
+    if ($Script:BgLeaveRunning) { $leftRunning = $true }
+    if ($leftRunning) {
+        Write-Warn "Stop will not kill DISM, SFC, winget, or Windows Update once that step has started. It keeps running until it finishes. Later steps are skipped."
+    } else {
+        if ($Script:BgPowerShell) {
+            try { $Script:BgPowerShell.Stop() } catch {
+                Write-Warn ("Could not stop the background step: {0}" -f $_.Exception.Message)
+            }
+        }
+        Write-Warn "Cancel requested - stopping after current step..."
     }
 }
 
@@ -66,14 +79,22 @@ function Assert-NotCancelled {
 }
 
 function Register-TrackedProcess {
-    param([System.Diagnostics.Process]$Process)
+    param(
+        [System.Diagnostics.Process]$Process,
+        [switch]$LeaveRunning
+    )
     if ($Process) {
         try { [void]$Script:TrackedProcesses.Add($Process) } catch { }
+        if ($LeaveRunning) {
+            if (-not $Script:TrackedLeaveRunning) { $Script:TrackedLeaveRunning = @{} }
+            $Script:TrackedLeaveRunning[[string]$Process.Id] = $true
+        }
     }
 }
 
 function Clear-TrackedProcesses {
     try { $Script:TrackedProcesses.Clear() } catch { }
+    $Script:TrackedLeaveRunning = @{}
 }
 
 function Enqueue-UiEvent {
@@ -211,7 +232,8 @@ function Invoke-WithUiWait {
         [string]$Activity = "Working",
         [int]$TimeoutSec = 900,
         [object[]]$ArgumentList = @(),
-        [switch]$Sta
+        [switch]$Sta,
+        [switch]$LeaveRunning
     )
     Assert-NotCancelled
     $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
@@ -222,6 +244,7 @@ function Invoke-WithUiWait {
     $ps = [System.Management.Automation.PowerShell]::Create()
     $ps.Runspace = $rs
     $Script:BgPowerShell = $ps
+    $Script:BgLeaveRunning = [bool]$LeaveRunning
     [void]$ps.AddScript($ScriptBlock)
     foreach ($a in $ArgumentList) {
         [void]$ps.AddArgument($a)
@@ -231,24 +254,42 @@ function Invoke-WithUiWait {
     $spin = @('|','/','-','\')
     $i = 0
     $lastHbSec = -15
+    $notedStop = $false
+    $notedTimeout = $false
     try {
         while (-not $handle.IsCompleted) {
-            if (Test-CancelRequested) {
-                try { $ps.Stop() } catch { }
+            if (Test-CancelRequested -and -not $LeaveRunning) {
+                try { $ps.Stop() } catch {
+                    Write-Warn ("Could not stop {0}: {1}" -f $Activity, $_.Exception.Message)
+                }
                 Write-Warn "$Activity cancelled"
                 return $null
             }
             if ($sw.Elapsed.TotalSeconds -ge $TimeoutSec) {
-                try { $ps.Stop() } catch { }
-                Write-Warn "$Activity timed out after ${TimeoutSec}s"
-                return $null
+                if ($LeaveRunning) {
+                    if (-not $notedTimeout) {
+                        $notedTimeout = $true
+                        Write-Warn "$Activity is past ${TimeoutSec}s. Stop leaves it running until it finishes."
+                    }
+                } else {
+                    try { $ps.Stop() } catch {
+                        Write-Warn ("Could not stop {0}: {1}" -f $Activity, $_.Exception.Message)
+                    }
+                    Write-Warn "$Activity timed out after ${TimeoutSec}s"
+                    return $null
+                }
+            }
+            if (Test-CancelRequested -and $LeaveRunning -and -not $notedStop) {
+                $notedStop = $true
+                Write-Warn "$Activity keeps running after Stop. Later steps are skipped when it finishes."
             }
             $sec = [int]$sw.Elapsed.TotalSeconds
             $ch = $spin[$i % 4]
             Set-UiStatusText ("[{0}] {1}... {2}s" -f $ch, $Activity, $sec)
             if (($sec - $lastHbSec) -ge 15) {
                 $lastHbSec = $sec
-                Write-Info ("{0} still running... {1}s (Stop to cancel)" -f $Activity, $sec)
+                $hint = if ($LeaveRunning) { 'Stop skips later steps' } else { 'Stop to cancel' }
+                Write-Info ("{0} still running... {1}s ({2})" -f $Activity, $sec, $hint)
             }
             Write-Host -NoNewline ("`r  [{0}] {1}... {2}s   " -f $ch, $Activity, $sec) -ForegroundColor DarkYellow
             Pump-Ui
@@ -256,7 +297,7 @@ function Invoke-WithUiWait {
             $i++
         }
         Write-Host ""
-        if (Test-CancelRequested) {
+        if (Test-CancelRequested -and -not $LeaveRunning) {
             Write-Warn "$Activity cancelled"
             return $null
         }
@@ -269,6 +310,7 @@ function Invoke-WithUiWait {
         return $result
     } finally {
         $Script:BgPowerShell = $null
+        $Script:BgLeaveRunning = $false
         $ps.Dispose()
         $rs.Dispose()
     }
@@ -883,7 +925,7 @@ function Remove-OldFilesInPath {
     if (-not (Test-Path -LiteralPath $Path)) { return 0 }
     Assert-NotCancelled
     $cutoff = (Get-Date).AddDays(-$OlderThanDays)
-    $acc = @{ Freed = [long]0; N = 0; LastLogN = 0 }
+    $acc = @{ Freed = [long]0; N = 0; LastLogN = 0; Failed = 0 }
     $label = Split-Path $Path -Leaf
     if ([string]::IsNullOrWhiteSpace($label)) { $label = $Path }
     Update-CleanupLiveStatus -PathLabel $label -Files 0 -Bytes 0
@@ -903,7 +945,9 @@ function Remove-OldFilesInPath {
             Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop
             $acc.Freed = [long]$acc.Freed + $len
             $acc.N = [int]$acc.N + 1
-        } catch { }
+        } catch {
+            $acc.Failed = [int]$acc.Failed + 1
+        }
         $nNow = [int]$acc.N
         if (($nNow % 80) -eq 0 -and $nNow -gt 0) {
             Assert-NotCancelled
@@ -927,6 +971,9 @@ function Remove-OldFilesInPath {
     $n = [int]$acc.N
     if ($skipped -gt 0) {
         Write-Info ("{0}: skipped {1} reparse point(s)" -f $label, $skipped)
+    }
+    if ([int]$acc.Failed -gt 0) {
+        Write-Warn ("{0}: {1:N0} file(s) were in use and could not be deleted." -f $label, [int]$acc.Failed)
     }
     if ($n -gt 0) {
         Update-CleanupLiveStatus -PathLabel $label -Files $n -Bytes $freed
@@ -1266,7 +1313,7 @@ function Invoke-WindowsUpdate {
                 $n++
                 Write-Info ("Update {0}/{1}: {2}" -f $n, $titles.Count, $t)
             }
-            $install = Invoke-WithUiWait -Activity "Installing Windows Updates" -TimeoutSec 3600 -Sta -ScriptBlock {
+            $install = Invoke-WithUiWait -Activity "Installing Windows Updates" -TimeoutSec 3600 -Sta -LeaveRunning -ScriptBlock {
                 try {
                     # Raw WIA COM API instead of PSWindowsUpdate install: works in non-interactive
                     # hosts (hidden window), accepts EULAs up front, and skips updates whose
@@ -1626,7 +1673,7 @@ function Invoke-WingetUpdates {
         $skippedJoined = [string]::Join("`n", [string[]]@($skipped))
         $explicitJoined = [string]::Join("`n", [string[]]@($explicitIds))
         $bulkCount = $packageIds.Count
-        $outObj = Invoke-WithUiWait -Activity "winget upgrade" -TimeoutSec 3600 -ArgumentList @($winget, $skippedJoined, $explicitJoined, $bulkCount) -ScriptBlock {
+        $outObj = Invoke-WithUiWait -Activity "winget upgrade" -TimeoutSec 3600 -LeaveRunning -ArgumentList @($winget, $skippedJoined, $explicitJoined, $bulkCount) -ScriptBlock {
             param([string]$WingetPath, [string]$SkippedJoined, [string]$ExplicitJoined, [int]$BulkCount)
             $mustPin = @()
             if ($SkippedJoined -and $SkippedJoined.Trim()) {
@@ -1987,6 +2034,20 @@ function Write-HeadlessRunLog {
     return $path
 }
 
+function Get-LastScheduledRunSummary {
+    $path = Join-Path (Join-Path $env:LOCALAPPDATA 'PC-Maintenance-Kit') 'scheduled-last-run.log'
+    if (-not (Test-Path -LiteralPath $path)) { return 'No weekly run recorded yet.' }
+    try {
+        $raw = [System.IO.File]::ReadAllText($path)
+    } catch {
+        return 'Could not read the last weekly run.'
+    }
+    $flat = ($raw -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($flat)) { return 'No weekly run recorded yet.' }
+    if ($flat.Length -gt 220) { $flat = $flat.Substring(0, 220).Trim() + '...' }
+    return $flat
+}
+
 function Show-RebootRecommendedDialog {
     if (-not (Test-RebootPending)) { return }
     if ($Script:HeadlessRun) {
@@ -2150,7 +2211,7 @@ function Confirm-RepairAction {
     if ($Gui) {
         try {
             $r = Show-UiMessageBox `
-                -Text ("{0}`n`nThis can take 15-60+ minutes and may require a restart.`nA restore point is recommended.`nYou can press Stop to abort.`n`nContinue?" -f $label) `
+                -Text ("{0}`n`nThis can take 15-60+ minutes and may require a restart.`nA restore point is recommended.`n`nStop skips steps that have not started. DISM or SFC that has already started keeps running until Windows finishes it.`n`nContinue?" -f $label) `
                 -Caption "Confirm repair" `
                 -Buttons ([System.Windows.Forms.MessageBoxButtons]::YesNo) `
                 -Icon ([System.Windows.Forms.MessageBoxIcon]::Warning)
@@ -2163,6 +2224,7 @@ function Confirm-RepairAction {
     Write-Host ""
     Write-Host ("  WARNING: {0}" -f $label) -ForegroundColor Yellow
     Write-Host "  This can take a long time and may require a restart." -ForegroundColor DarkYellow
+    Write-Host "  Stop skips steps that have not started. DISM or SFC already running is left to finish." -ForegroundColor DarkGray
     Write-Host "  Type YES (all caps) to continue, anything else to cancel." -ForegroundColor DarkGray
     $ans = Read-Host "  Confirm"
     return ($ans -eq 'YES')
@@ -2177,21 +2239,21 @@ function Invoke-Repair {
         Write-Info "DISM /RestoreHealth starting..."
         $dismLog = Join-Path (Get-AppTempDirectory) "dism_$(Get-Date -Format 'HHmmss').log"
         $p = Start-Process -FilePath "DISM.exe" -ArgumentList "/Online","/Cleanup-Image","/RestoreHealth","/LogPath:$dismLog" -PassThru -NoNewWindow
-        Register-TrackedProcess $p
+        Register-TrackedProcess $p -LeaveRunning
         $spin = @('|','/','-','\'); $i = 0
         $lastHbSec = -15
+        $notedStop = $false
         while (-not $p.HasExited) {
-            if (Test-CancelRequested) {
-                try { $p.Kill() } catch { }
-                Write-Warn "DISM cancelled"
-                return
+            if (Test-CancelRequested -and -not $notedStop) {
+                $notedStop = $true
+                Write-Warn "Stop will not kill DISM. It keeps running until Windows finishes. SFC is skipped after that."
             }
             $sec = [int]((Get-Date) - $p.StartTime).TotalSeconds
             Write-Host -NoNewline ("`r  [{0}] DISM running... {1}s   " -f $spin[$i % 4], $sec) -ForegroundColor DarkYellow
             Set-UiStatusText -Text ("[{0}] DISM running... {1}s" -f $spin[$i % 4], $sec)
             if (($sec - $lastHbSec) -ge 15) {
                 $lastHbSec = $sec
-                Write-Info ("DISM still running... {0}s (Stop to cancel)" -f $sec)
+                Write-Info ("DISM still running... {0}s (Stop skips later steps)" -f $sec)
             }
             Pump-Ui
             Start-Sleep -Milliseconds 400
@@ -2206,6 +2268,10 @@ function Invoke-Repair {
             $shown = if ($null -eq $code) { 'unknown' } else { $code }
             Write-Warn "DISM exit code $shown - see $dismLog"
         }
+        if (Test-CancelRequested) {
+            Write-Warn "DISM finished after Stop. SFC was not started."
+            return
+        }
     } catch {
         if ($_.Exception.Message -match 'Cancelled') { throw }
         Write-Fail "DISM failed: $($_.Exception.Message)"
@@ -2215,21 +2281,21 @@ function Invoke-Repair {
     try {
         Write-Info "SFC /scannow starting..."
         $p = Start-Process -FilePath "sfc.exe" -ArgumentList "/scannow" -PassThru -NoNewWindow
-        Register-TrackedProcess $p
+        Register-TrackedProcess $p -LeaveRunning
         $spin = @('|','/','-','\'); $i = 0
         $lastHbSec = -15
+        $notedStop = $false
         while (-not $p.HasExited) {
-            if (Test-CancelRequested) {
-                try { $p.Kill() } catch { }
-                Write-Warn "SFC cancelled"
-                return
+            if (Test-CancelRequested -and -not $notedStop) {
+                $notedStop = $true
+                Write-Warn "Stop will not kill SFC. It keeps running until Windows finishes."
             }
             $sec = [int]((Get-Date) - $p.StartTime).TotalSeconds
             Write-Host -NoNewline ("`r  [{0}] SFC running... {1}s   " -f $spin[$i % 4], $sec) -ForegroundColor DarkYellow
             Set-UiStatusText -Text ("[{0}] SFC running... {1}s" -f $spin[$i % 4], $sec)
             if (($sec - $lastHbSec) -ge 15) {
                 $lastHbSec = $sec
-                Write-Info ("SFC still running... {0}s (Stop to cancel)" -f $sec)
+                Write-Info ("SFC still running... {0}s (Stop leaves SFC running)" -f $sec)
             }
             Pump-Ui
             Start-Sleep -Milliseconds 400
@@ -2316,17 +2382,20 @@ function Invoke-MaintenanceRun {
     Append-UiLog ""
     Append-UiLog "======== DONE ========" "Green"
     Append-UiLog $summary "Cyan"
-    if (-not (Test-CancelRequested)) {
-        if ($Script:HeadlessRun) {
-            if (Test-RebootPending) {
-                Write-Warn "A restart is pending. Scheduled run will not prompt."
-            }
-            Write-HeadlessRunLog -Summary $summary
-        } else {
-            Show-RebootRecommendedDialog
-            if (Get-Command Show-RunSummaryDialog -EA SilentlyContinue) {
-                Show-RunSummaryDialog -Title "PC Maintenance - Summary" -Summary (Get-RunSummaryObject)
-            }
+    if ($Script:HeadlessRun) {
+        if (Test-RebootPending) {
+            Write-Warn "A restart is pending. Scheduled run will not prompt."
+        }
+        $flagLine = ("Flags: cleanup=on restore={0} shaders={1} gaming={2} windows-update={3} winget={4} repair=off cache-wipe=off" -f `
+            [bool]$Script:DoRestorePoint, [bool]$Script:DoShaderCleanup, [bool]$Script:DoGamingOptimize, `
+            [bool]$Script:DoWinUpdate, [bool]$Script:DoWinget)
+        $head = $flagLine
+        if (Test-CancelRequested) { $head = "Stopped before every step finished.`r`n" + $head }
+        Write-HeadlessRunLog -Summary ($head + "`r`n" + $summary)
+    } elseif (-not (Test-CancelRequested)) {
+        Show-RebootRecommendedDialog
+        if (Get-Command Show-RunSummaryDialog -EA SilentlyContinue) {
+            Show-RunSummaryDialog -Title "PC Maintenance - Summary" -Summary (Get-RunSummaryObject)
         }
     }
     Clear-TrackedProcesses

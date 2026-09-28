@@ -2,19 +2,19 @@
 
 Gamer-focused Windows 10/11 maintenance toolkit. Cleanup, gaming tweaks, controlled updates, and optional DISM/SFC repair — in a dark tabbed GUI.
 
-**Current version:** see [`VERSION`](VERSION) (v5.4.0).
+**Current version:** see [`VERSION`](VERSION) (v5.4.2).
 
 ## Run it
 
 Copy this into **PowerShell** and press Enter:
 
 ```powershell
-irm https://raw.githubusercontent.com/singhRamandeep101/PC-Maintenance-Kit/main/Get.ps1 | iex
+irm https://raw.githubusercontent.com/singhRamandeep101/PC-Maintenance-Kit/v5.4.2/Get.ps1 | iex
 ```
 
 That downloads the latest **GitHub Release** ZIP, verifies its SHA256, installs it to `%LOCALAPPDATA%\PC-Maintenance-Kit`, adds a Desktop shortcut, and opens the app. Windows will ask for Administrator permission.
 
-You can read [Get.ps1](Get.ps1) first — it is short and does not hide anything. The installer checks the release ZIP SHA256 before extracting.
+The tagged URL is the one to run. `main` can change after you read it. The script you pipe is the only step that runs before the ZIP hash check, so open [Get.ps1](Get.ps1) first if you want to see it. It is short and does not hide anything. The installer still refuses a ZIP whose SHA256 does not match.
 
 Already have the repo? Double-click **Start.bat**.
 
@@ -50,7 +50,7 @@ Already have the repo? Double-click **Start.bat**.
 Every GitHub Release includes `PC-Maintenance-Kit-vX.Y.Z.zip` and `PC-Maintenance-Kit-vX.Y.Z.zip.sha256`.
 
 ```powershell
-$zip = "$env:USERPROFILE\Downloads\PC-Maintenance-Kit-v5.4.0.zip"
+$zip = "$env:USERPROFILE\Downloads\PC-Maintenance-Kit-v5.4.2.zip"
 $want = (Get-Content "$zip.sha256" -Raw)
 if ($want -notmatch '([A-Fa-f0-9]{64})') { throw 'Checksum file is missing a hash.' }
 $got = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -112,7 +112,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-Release.ps1
 Version comes from the `VERSION` file. Passing `-Version` is allowed only when it matches
 `VERSION`, so the ZIP name can never disagree with the version inside it.
 
-Output: `dist\PC-Maintenance-Kit-v5.4.0.zip` and `dist\PC-Maintenance-Kit-v5.4.0.zip.sha256`
+Output: `dist\PC-Maintenance-Kit-v5.4.2.zip` and `dist\PC-Maintenance-Kit-v5.4.2.zip.sha256`
 
 ## Requirements
 

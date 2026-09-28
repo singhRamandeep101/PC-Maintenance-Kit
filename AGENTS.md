@@ -107,15 +107,15 @@ the parse check above is the closest thing to one, so a syntax error will fail t
 ## Release build
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-Release.ps1 -Version 5.4.0
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-Release.ps1 -Version 5.4.2
 ```
 
-Produces `dist\PC-Maintenance-Kit-v5.4.0.zip` and `.zip.sha256`. Optional signing:
+Produces `dist\PC-Maintenance-Kit-v5.4.2.zip` and `.zip.sha256`. Optional signing:
 
 ```powershell
-.\Build-Release.ps1 -Version 5.4.0 -CertThumbprint 'THUMBPRINT'
+.\Build-Release.ps1 -Version 5.4.2 -CertThumbprint 'THUMBPRINT'
 # or
-.\Build-Release.ps1 -Version 5.4.0 -PfxPath 'C:\certs\pcmk.pfx' -PfxPassword 'your-password'
+.\Build-Release.ps1 -Version 5.4.2 -PfxPath 'C:\certs\pcmk.pfx' -PfxPassword 'your-password'
 ```
 
 CI (`.github\workflows\ci.yml`) runs the test suite, then runs `Build-Release.ps1` (using

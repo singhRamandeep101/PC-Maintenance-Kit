@@ -9,7 +9,12 @@
     Administrator permission is requested on launch.
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/singhRamandeep101/PC-Maintenance-Kit/main/Get.ps1 | iex
+    irm https://raw.githubusercontent.com/singhRamandeep101/PC-Maintenance-Kit/v5.4.2/Get.ps1 | iex
+
+.NOTES
+    The ZIP this script downloads is checked against its SHA256 before anything is installed.
+    The script itself is the one piece that runs before that check. Prefer the tagged URL
+    above, which does not move after the release, and read this file before piping it to iex.
 #>
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12

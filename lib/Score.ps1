@@ -209,9 +209,11 @@ function Get-GamingOptimizationScore {
     try {
         $s = Get-DeviceSummary -Refresh:$Refresh
         $summaryOk = $true
-    } catch { }
+    } catch {
+        Write-Warn ("Score could not read the device summary: {0}" -f $_.Exception.Message)
+    }
 
-    # ---- Storage (weight 0.22) ----
+    # ---- Storage (weight 0.16) ----
     $mediaPts = 40.0
     $freePts = 40.0
     $healthPts = 20.0
@@ -242,7 +244,9 @@ function Get-GamingOptimizationScore {
         if (-not $disk -and (Get-Command Get-SystemDisk -EA SilentlyContinue)) {
             $disk = Get-SystemDisk
         }
-    } catch { }
+    } catch {
+        Write-Warn ("Score could not read the disk: {0}" -f $_.Exception.Message)
+    }
 
     $mediaType = $null
     if ($disk) {
@@ -321,7 +325,7 @@ function Get-GamingOptimizationScore {
     [void]$checks.Add((New-OptimizationCheck -Id 'storage_health' -Category 'Storage' -Status $healthStatus `
         -Points $healthScore -Max $healthPts -Title 'Disk health' -Detail $healthDetail))
 
-    # ---- Memory (weight 0.20) ----
+    # ---- Memory (weight 0.10) ----
     $memCapMax = 50.0
     $memChMax = 50.0
     $capScore = 0.0
@@ -394,7 +398,7 @@ function Get-GamingOptimizationScore {
         -Points $chScore -Max $memChMax -Title 'RAM channels' -Detail $chDetail `
         -FixHint $chHint -FixAction $chFix))
 
-    # ---- Power (weight 0.18) ----
+    # ---- Power (weight 0.22) ----
     $powerMax = 100.0
     $powerScore = 0.0
     $powerStatus = 'Unknown'
@@ -438,7 +442,7 @@ function Get-GamingOptimizationScore {
         -Points $powerScore -Max $powerMax -Title 'Power plan' -Detail $powerDetail `
         -FixHint $powerHint -FixAction $powerFix))
 
-    # ---- DisplayGpu (weight 0.15) ----
+    # ---- DisplayGpu (weight 0.12) ----
     $refMax = 55.0
     $drvMax = 45.0
     $refScore = 0.0
@@ -524,7 +528,7 @@ function Get-GamingOptimizationScore {
         -Points $drvScore -Max $drvMax -Title 'GPU driver' -Detail $drvDetail `
         -FixHint $drvHint -FixAction $drvFix))
 
-    # ---- GamingFeatures (weight 0.12) ----
+    # ---- GamingFeatures (weight 0.20) ----
     $gmMax = 45.0
     $dvrMax = 40.0
     $hagsMax = 15.0
@@ -600,7 +604,7 @@ function Get-GamingOptimizationScore {
     [void]$checks.Add((New-OptimizationCheck -Id 'hags' -Category 'GamingFeatures' -Status $hagsStatus `
         -Points $hagsScore -Max $hagsMax -Title 'HAGS' -Detail $hagsDetail))
 
-    # ---- Background (weight 0.08) ----
+    # ---- Background (weight 0.14) ----
     $bgMax = 100.0
     $startupCount = Get-StartupEntryCount
     $bgScore = $bgMax
@@ -628,7 +632,7 @@ function Get-GamingOptimizationScore {
         -Points $bgScore -Max $bgMax -Title 'Startup programs' -Detail $bgDetail `
         -FixHint $bgHint -FixAction $bgFix))
 
-    # ---- Hygiene (weight 0.05) ----
+    # ---- Hygiene (weight 0.06) ----
     $hygMax = 100.0
     $hygScore = $hygMax
     $hygStatus = 'Good'
@@ -656,14 +660,16 @@ function Get-GamingOptimizationScore {
         -Points $hygScore -Max $hygMax -Title 'Pending restart' -Detail $hygDetail))
 
     # ---- Aggregate ----
+    # Settings the kit can change (power, game features, startup, reboot) outweigh
+    # hardware the PC already has (disk type, RAM). Free space still sits in Storage.
     $weights = @{
-        Storage         = 0.22
-        Memory          = 0.20
-        Power           = 0.18
-        DisplayGpu      = 0.15
-        GamingFeatures  = 0.12
-        Background      = 0.08
-        Hygiene         = 0.05
+        Storage         = 0.16
+        Memory          = 0.10
+        Power           = 0.22
+        DisplayGpu      = 0.12
+        GamingFeatures  = 0.20
+        Background      = 0.14
+        Hygiene         = 0.06
     }
 
     $categories = New-Object System.Collections.Generic.List[object]
@@ -754,7 +760,7 @@ function Format-OptimizationScoreText {
         return ('Opt score: {0}/100 ({1})  -  limiter: {2}' -f $ScoreObject.Score, $ScoreObject.Grade, $ScoreObject.BiggestLimiter)
     }
     $lines = New-Object System.Collections.Generic.List[string]
-    [void]$lines.Add(('Gaming optimization: {0}/100  -  {1}' -f $ScoreObject.Score, $ScoreObject.Grade))
+    [void]$lines.Add(('Setup score: {0}/100  -  {1}. Hardware you own is part of this. Top fixes are what you can change.' -f $ScoreObject.Score, $ScoreObject.Grade))
     [void]$lines.Add(('Biggest limiter: {0}' -f $ScoreObject.BiggestLimiter))
     [void]$lines.Add(('Hardware readiness: {0} ({1}/{2})  -  {3}' -f `
         $ScoreObject.HardwareReadiness.Label,

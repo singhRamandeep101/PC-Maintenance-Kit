@@ -96,7 +96,9 @@ function Get-DeviceSummary {
             $diskName = $media.FriendlyName
             $diskHealth = [string]$media.HealthStatus
         }
-    } catch { }
+    } catch {
+        Write-Warn ("Could not read the system disk: {0}" -f $_.Exception.Message)
+    }
 
     $free = Get-CFreeGB -Refresh:$Refresh
     $trim = "Unknown"

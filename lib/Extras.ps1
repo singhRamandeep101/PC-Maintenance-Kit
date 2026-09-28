@@ -39,7 +39,9 @@ function Get-GuiSettingsPath {
     }
     foreach ($old in $legacy) {
         if (Test-PathSafe $old) {
-            try { Copy-Item -LiteralPath $old -Destination $path -Force } catch { }
+            try { Copy-Item -LiteralPath $old -Destination $path -Force } catch {
+                Write-Warn ("Could not copy saved settings from {0}: {1}" -f $old, $_.Exception.Message)
+            }
             break
         }
     }
@@ -66,6 +68,8 @@ function Get-DefaultGuiSettings {
         CheckUpdatesOnStart = $true
         CarePreset      = 'Gamer'
         ScheduleWeekly  = $false
+        ScheduleUpdates = $false
+        ScheduleGaming  = $false
     }
 }
 
@@ -89,6 +93,8 @@ function Save-GuiSettings {
             UpdWU           = [bool]$Controls.ChkUpdWU.Checked
             UpdWinget       = [bool]$Controls.ChkUpdWinget.Checked
             RepRestore      = [bool]$Controls.ChkRepRestore.Checked
+            ScheduleUpdates = [bool]$(if ($Controls.ChkScheduleUpdates) { $Controls.ChkScheduleUpdates.Checked } else { $false })
+            ScheduleGaming  = [bool]$(if ($Controls.ChkScheduleGaming) { $Controls.ChkScheduleGaming.Checked } else { $false })
         }
         # Carry forward every key that has no control behind it, including keys
         # written by a newer build, so a save never silently drops settings.
@@ -129,7 +135,9 @@ function Load-GuiSettings {
         foreach ($prop in $j.PSObject.Properties) {
             $defaults[$prop.Name] = $prop.Value
         }
-    } catch { }
+    } catch {
+        Write-Warn ("Could not read saved settings ({0}). Defaults are in use." -f $_.Exception.Message)
+    }
     return $defaults
 }
 
@@ -149,6 +157,8 @@ function Get-GuiSettingControlMap {
         ChkUpdWU        = 'UpdWU'
         ChkUpdWinget    = 'UpdWinget'
         ChkRepRestore   = 'RepRestore'
+        ChkScheduleUpdates = 'ScheduleUpdates'
+        ChkScheduleGaming = 'ScheduleGaming'
     }
 }
 
