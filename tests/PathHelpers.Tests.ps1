@@ -302,8 +302,14 @@ $fakeUd = Join-Path $env:TEMP ('pcmk-chrome-ud-' + [guid]::NewGuid().ToString('N
 New-Item -ItemType Directory -Path (Join-Path $fakeUd 'ShaderCache') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $fakeUd 'Guest Profile\Cache') -Force | Out-Null
 $chromPaths = @(Get-ChromiumProfileCachePaths -UserDataRoot $fakeUd)
-Assert-True ($chromPaths -contains (Join-Path $fakeUd 'ShaderCache')) 'Chromium root ShaderCache included'
-Assert-True ($chromPaths -contains (Join-Path $fakeUd 'Guest Profile\Cache')) 'Guest Profile Cache included'
+function Test-SamePath([string]$Left, [string]$Right) {
+    if (-not $Left -or -not $Right) { return $false }
+    return ([System.IO.Path]::GetFullPath($Left).TrimEnd('\') -eq [System.IO.Path]::GetFullPath($Right).TrimEnd('\'))
+}
+$hasShader = @($chromPaths | Where-Object { Test-SamePath $_ (Join-Path $fakeUd 'ShaderCache') }).Count -gt 0
+$hasGuest = @($chromPaths | Where-Object { Test-SamePath $_ (Join-Path $fakeUd 'Guest Profile\Cache') }).Count -gt 0
+Assert-True $hasShader 'Chromium root ShaderCache included'
+Assert-True $hasGuest 'Guest Profile Cache included'
 Remove-Item -LiteralPath $fakeUd -Recurse -Force -EA SilentlyContinue
 
 $previewErr = $null
