@@ -22,6 +22,7 @@ try {
     . (Join-Path $Script:AppRoot "lib\Core.ps1")
     . (Join-Path $Script:AppRoot "lib\Gaming.ps1")
     . (Join-Path $Script:AppRoot "lib\Device.ps1")
+    . (Join-Path $Script:AppRoot "lib\Security.ps1")
     . (Join-Path $Script:AppRoot "lib\Score.ps1")
     . (Join-Path $Script:AppRoot "lib\Extras.ps1")
     . (Join-Path $Script:AppRoot "lib\Care.ps1")

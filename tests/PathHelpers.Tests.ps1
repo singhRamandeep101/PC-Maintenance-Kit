@@ -25,6 +25,7 @@ function Invoke-GuiLayoutHunts {
     Add-Type -AssemblyName System.Drawing
     . (Join-Path $Root 'lib\Gaming.ps1')
     . (Join-Path $Root 'lib\Device.ps1')
+    . (Join-Path $Root 'lib\Security.ps1')
     . (Join-Path $Root 'lib\Score.ps1')
     . (Join-Path $Root 'lib\Care.ps1')
     . (Join-Path $Root 'lib\Gui.ps1')
@@ -36,7 +37,7 @@ function Invoke-GuiLayoutHunts {
     $form.ClientSize = New-Object System.Drawing.Size(1000, 860)
     $form.ShowInTaskbar = $false
     $pages = @{}
-    foreach ($name in @('Home','Cleanup','Updates','Gaming','Repair','Device')) {
+    foreach ($name in @('Home','Cleanup','Updates','Gaming','Repair','Security','Device')) {
         $page = New-Object System.Windows.Forms.Panel
         $page.Dock = 'Fill'
         $form.Controls.Add($page)
@@ -47,8 +48,9 @@ function Invoke-GuiLayoutHunts {
     $upd = Add-GuiUpdatesPage -Page $pages.Updates -Theme $Script:Theme
     $game = Add-GuiGamingPage -Page $pages.Gaming -Theme $Script:Theme
     $repair = Add-GuiRepairPage -Page $pages.Repair -Theme $Script:Theme
+    $security = Add-GuiSecurityPage -Page $pages.Security -Theme $Script:Theme
     $device = Add-GuiDevicePage -Page $pages.Device -Theme $Script:Theme
-    foreach ($k in @('BtnWeekly','ChkHomeWU','ChkScheduleWeekly','ChkScheduleUpdates','ChkScheduleGaming','LblLastScheduledRun','HomeFixesVal','CpuMain')) {
+    foreach ($k in @('BtnWeekly','ChkHomeWU','ChkScheduleWeekly','ChkScheduleUpdates','ChkScheduleGaming','LblLastScheduledRun','HomeFixesVal','HomeSecurityVal','CpuMain')) {
         Assert-True ($homePage.Contains($k) -and $null -ne $homePage[$k]) "Home returns $k"
     }
     Assert-True (-not $homePage.ChkScheduleUpdates.Checked) 'Weekly task update opt-in defaults off'
@@ -58,12 +60,17 @@ function Invoke-GuiLayoutHunts {
     foreach ($k in @('BtnUpdates','ChkUpdWU','ChkUpdWinget','LblUpdatesLive')) {
         Assert-True ($upd.Contains($k) -and $null -ne $upd[$k]) "Updates returns $k"
     }
-    foreach ($k in @('BtnGamingOpt','OptFixesVal','OptGradeLetter','OptStatusPill')) {
+    foreach ($k in @('BtnGamingOpt','OptFixesVal','OptGradeLetter','OptStatusPill','GameStartupVal','BtnOpenStartup')) {
         Assert-True ($game.Contains($k) -and $null -ne $game[$k]) "Gaming returns $k"
     }
     foreach ($k in @('BtnRepair','ChkRepRestore','LblRepairLive')) {
         Assert-True ($repair.Contains($k) -and $null -ne $repair[$k]) "Repair returns $k"
     }
+    foreach ($k in @('BtnOpenMalwarebytes','BtnOpenWindowsSecurity','BtnRefreshSecurity','SecVerdict','SecRealtime')) {
+        Assert-True ($security.Contains($k) -and $null -ne $security[$k]) "Security returns $k"
+    }
+    Assert-True ($security.SecVerdict.Text -eq 'Reading...') 'Security page shows Reading before the first probe'
+    Assert-True ($security.BtnOpenWindowsSecurity.Text -eq 'Open Windows Security') 'Security page button opens Windows Security'
     foreach ($k in @('BtnRestartNow','DevCpu','DevRamTip','DevRebootPill')) {
         Assert-True ($device.Contains($k) -and $null -ne $device[$k]) "Device returns $k"
     }
@@ -494,6 +501,44 @@ Assert-True ($null -ne $summary -and $summary.Cpu) 'Get-DeviceSummary returns CP
 $summary2 = Get-DeviceSummary
 Assert-True ([object]::ReferenceEquals($summary, $summary2)) 'Get-DeviceSummary cache returns same object'
 
+. (Join-Path $Root 'lib\Security.ps1')
+$securityErr = $null
+$securityHealth = $null
+try {
+    $securityHealth = Get-SecurityHealth
+} catch {
+    $securityErr = $_
+}
+Assert-True ($null -eq $securityErr) 'Get-SecurityHealth does not throw'
+Assert-True ($null -ne $securityHealth) 'Get-SecurityHealth returns an object'
+foreach ($prop in @('Defender','Firewall','Malwarebytes','Verdict')) {
+    Assert-True ($securityHealth.PSObject.Properties.Name -contains $prop) "Get-SecurityHealth returns $prop"
+}
+Assert-True ($securityHealth.Verdict -eq 'Protected' -or $securityHealth.Verdict -eq 'Needs attention') 'Security verdict is Protected or Needs attention'
+Assert-True ($securityHealth.Malwarebytes.Installed -is [bool]) 'Malwarebytes.Installed is bool'
+$securityHealth2 = Get-SecurityHealth
+Assert-True ([object]::ReferenceEquals($securityHealth, $securityHealth2)) 'Get-SecurityHealth cache returns same object'
+$securityText = Format-SecurityHealthText
+Assert-True ($securityText -match 'Scans run in Windows Security or Malwarebytes') 'Security report says scans stay in the other apps'
+$securityRaw = Get-Content -LiteralPath (Join-Path $Root 'lib\Security.ps1') -Raw
+Assert-True ($securityRaw -notmatch 'Start-MpScan') 'Security health does not start a Defender scan'
+
+$mbRoot = Join-Path $env:TEMP ('pcmk-mb-' + [guid]::NewGuid().ToString('N'))
+$mbExeDir = Join-Path $mbRoot 'Malwarebytes\Anti-Malware'
+$mbExe = Join-Path $mbExeDir 'Malwarebytes.exe'
+$mbMissing = Join-Path $env:TEMP ('pcmk-mb-missing-' + [guid]::NewGuid().ToString('N'))
+try {
+    New-Item -ItemType Directory -Path $mbExeDir -Force | Out-Null
+    Set-Content -LiteralPath $mbExe -Value 'not a real executable' -Encoding ASCII
+    $mbFound = Find-MalwarebytesInstall -SearchRoots @($mbRoot)
+    Assert-True ($mbFound.Installed) 'Fake Malwarebytes.exe is detected'
+    Assert-True ($mbFound.Path -eq $mbExe) 'Fake Malwarebytes path is the planted exe'
+    $mbAbsent = Find-MalwarebytesInstall -SearchRoots @($mbMissing)
+    Assert-True (-not $mbAbsent.Installed) 'Search root with no Malwarebytes.exe is not installed'
+} finally {
+    Remove-Item -LiteralPath $mbRoot -Recurse -Force -EA SilentlyContinue
+}
+
 # Reboot-pending must use hard WU/CBS signals only. Stale PendingFileRenameOperations
 # (Gaming Services / InstallShield temp leftovers) must not tank Hygiene forever.
 $ri = Get-RebootPendingInfo
@@ -569,9 +614,23 @@ $weightSum = ($optScore.Categories | Measure-Object -Property Weight -Sum).Sum
 Assert-True ([math]::Abs($weightSum - 1.0) -lt 0.001) 'Category weights sum to 1.0'
 $byName = @{}
 foreach ($c in @($optScore.Categories)) { $byName[$c.Name] = [double]$c.Weight }
-$actionable = $byName.Power + $byName.GamingFeatures + $byName.Background + $byName.Hygiene
+$actionable = $byName.Power + $byName.GamingFeatures + $byName.Background + $byName.Hygiene + $byName.Security
 $hardware = $byName.Storage + $byName.Memory
 Assert-True ($actionable -gt $hardware) 'Settings you can change outweigh disk type and RAM'
+$secCat = @($optScore.Categories | Where-Object { $_.Name -eq 'Security' } | Select-Object -First 1)
+Assert-True ($null -ne $secCat -and [math]::Abs($secCat.Weight - 0.10) -lt 0.001) 'Score includes a Security category'
+$scanCheck = @($optScore.Checks | Where-Object { $_.Id -eq 'security_scan' } | Select-Object -First 1)
+Assert-True ($null -ne $scanCheck) 'Score includes the security scan check'
+$freshScan = Get-SecurityScanFreshness -LastScan ([datetime]::Now.AddDays(-3)) -Known $true
+$edgeScan = Get-SecurityScanFreshness -LastScan ([datetime]::Now.AddDays(-20)) -Known $true
+$staleScan = Get-SecurityScanFreshness -LastScan ([datetime]::Now.AddDays(-21)) -Known $true
+$neverScan = Get-SecurityScanFreshness -LastScan $null -Known $true
+$unreadScan = Get-SecurityScanFreshness -LastScan $null -Known $false
+Assert-True ($freshScan.Status -eq 'Good' -and $freshScan.Points -eq 100) 'A scan 3 days ago keeps full points'
+Assert-True ($edgeScan.Status -eq 'Good' -and $edgeScan.Points -eq 100) 'A scan 20 days ago keeps full points'
+Assert-True ($staleScan.Status -eq 'Bad' -and $staleScan.Points -eq 0) 'A scan 21 days ago scores zero'
+Assert-True ($neverScan.Status -eq 'Bad' -and $neverScan.Points -eq 0) 'No scan on record scores zero'
+Assert-True ($unreadScan.Status -eq 'Unknown' -and $unreadScan.Points -eq 100) 'An unreadable scan time does not lower the score'
 $hygCat = @($optScore.Categories | Where-Object { $_.Name -eq 'Hygiene' } | Select-Object -First 1)
 Assert-True ($null -ne $hygCat) 'Score includes Hygiene category'
 if (-not $hardAny) {
@@ -581,6 +640,24 @@ if (-not $hardAny) {
 }
 $hagsCheck = @($optScore.Checks | Where-Object { $_.Id -eq 'hags' } | Select-Object -First 1)
 Assert-True ($null -ne $hagsCheck -and $hagsCheck.Points -eq $hagsCheck.Max) 'HAGS does not soft-cap points when off/unknown'
+Assert-True (Test-StartupApprovedEnabled $null) 'Missing startup approval means the app still starts'
+Assert-True (Test-StartupApprovedEnabled ([byte[]](2, 0, 0, 0))) 'StartupApproved byte 2 means on'
+Assert-True (-not (Test-StartupApprovedEnabled ([byte[]](3, 0, 0, 0)))) 'StartupApproved byte 3 means off'
+$startupApps = @(Get-StartupApps)
+Assert-True ($null -ne $startupApps) 'Get-StartupApps returns a collection'
+Assert-True ((Get-StartupEntryCount) -eq @($startupApps | Where-Object { $_.Enabled }).Count) 'Startup count matches enabled apps'
+$startupText = Format-StartupAppList $startupApps
+Assert-True ($startupText -match 'Windows') 'Startup list tells you what starts with Windows'
+$startupMerged = @(Select-StartupAppWinners @(
+    [pscustomobject]@{ Name = 'Steam'; Enabled = $false; Source = 'User' },
+    [pscustomobject]@{ Name = 'steam'; Enabled = $true; Source = 'User folder' }
+))
+Assert-True ($startupMerged.Count -eq 1 -and $startupMerged[0].Enabled) 'Enabled startup entry wins over a disabled one with the same name'
+Assert-True (-not (Test-DefenderThreatActive 'False')) 'Threat IsActive string False is not active'
+Assert-True (-not (Test-DefenderThreatActive $false)) 'Threat IsActive false is not active'
+Assert-True (Test-DefenderThreatActive $true) 'Threat IsActive true is active'
+$sigToday = Format-SignatureHealthText ([pscustomobject]@{ Signatures = 'Current'; SignatureAgeDays = 0 })
+Assert-True ($sigToday -eq 'Current (today)') 'Signature age of 0 days says today'
 $optScore2 = Get-GamingOptimizationScore
 Assert-True ([object]::ReferenceEquals($optScore, $optScore2)) 'Optimization score cache returns same object'
 $shortTxt = Format-OptimizationScoreText -ScoreObject $optScore -Short
@@ -603,7 +680,7 @@ Assert-True ((Get-OptimizationGrade 0) -eq 'Critical') 'Grade 0 -> Critical'
 
 # Every check must carry a usable shape, and no fix may point at an unknown action
 $validStatus = @('Good', 'Warn', 'Bad', 'Unknown')
-$validActions = @('GamingOptimize', 'OpenStorage', 'CopyRamTip', 'OpenStartup', 'OpenDisplay', 'None')
+$validActions = @('GamingOptimize', 'OpenStorage', 'CopyRamTip', 'OpenStartup', 'OpenServices', 'OpenTasks', 'OpenDisplay', 'OpenSecurity', 'None')
 $badChecks = @($optScore.Checks | Where-Object {
     [string]::IsNullOrWhiteSpace($_.Id) -or
     [string]::IsNullOrWhiteSpace($_.Title) -or
@@ -619,9 +696,83 @@ $badCats = @($optScore.Categories | Where-Object { $_.Score -lt 0 -or $_.Score -
 Assert-True ($badCats.Count -eq 0) 'Every category score is 0..100'
 $limiterNames = @($optScore.Categories | ForEach-Object { $_.Name })
 Assert-True ($limiterNames -contains $optScore.BiggestLimiter) 'BiggestLimiter names a real category'
-$lowestScore = ($optScore.Categories | Measure-Object -Property Score -Minimum).Minimum
-$limiterScore = ($optScore.Categories | Where-Object { $_.Name -eq $optScore.BiggestLimiter } | Select-Object -First 1).Score
-Assert-True ($limiterScore -eq $lowestScore) 'BiggestLimiter is the lowest-scoring category'
+Assert-True ($optScore.BiggestLimiter -eq (Get-BiggestScoreLimiter $optScore.Categories)) 'BiggestLimiter is the category that costs the most points'
+$limiterProbe = @(
+    [pscustomobject]@{ Name = 'Hygiene'; Score = 30; Weight = 0.05 },
+    [pscustomobject]@{ Name = 'Memory'; Score = 50; Weight = 0.09 }
+)
+Assert-True ((Get-BiggestScoreLimiter $limiterProbe) -eq 'Memory') 'Limiter prefers the larger point loss over the lower percent'
+$holdApps = @(
+    [pscustomobject]@{ Name = 'Riot Vanguard'; Enabled = $false; Source = 'Machine' },
+    [pscustomobject]@{ Name = 'WallpaperEngine'; Enabled = $true; Source = 'User' }
+)
+$holdServices = @(
+    [pscustomobject]@{ Name = 'vgc'; DisplayName = 'vgc'; PathName = '"C:\Program Files\Riot Vanguard\vgc.exe"' },
+    [pscustomobject]@{ Name = 'wuauserv'; DisplayName = 'Windows Update'; PathName = 'C:\WINDOWS\system32\svchost.exe -k netsvcs' }
+)
+$holds = @(Select-StartupServiceHolds -Apps $holdApps -Services $holdServices)
+Assert-True ($holds.Count -eq 1 -and $holds[0] -eq 'Riot Vanguard') 'A disabled startup app is listed when its service still starts'
+$windowsHold = @(Select-StartupServiceHolds -Apps @([pscustomobject]@{ Name = 'WindowsUpdate'; Enabled = $false; Source = 'Machine' }) -Services @($holdServices[1]))
+Assert-True ($windowsHold.Count -eq 0) 'A Windows service does not count as a startup hold'
+$holdLine = Format-StartupServiceHoldList @('Riot Vanguard')
+Assert-True ($holdLine -eq 'Still starts as a service: Riot Vanguard') 'Service hold text names the app'
+$logonTasks = @(
+    [pscustomobject]@{ Name = 'Steam Client'; Path = '\'; Enabled = $true; Logon = $true },
+    [pscustomobject]@{ Name = 'WallpaperEngine'; Path = '\'; Enabled = $true; Logon = $true },
+    [pscustomobject]@{ Name = 'Something'; Path = '\Microsoft\Windows\'; Enabled = $true; Logon = $true },
+    [pscustomobject]@{ Name = 'PC Maintenance Kit - Weekly Full'; Path = '\'; Enabled = $true; Logon = $true }
+)
+$logonApps = @([pscustomobject]@{ Name = 'WallpaperEngine'; Enabled = $true; Source = 'User' })
+$logonTasks += @(
+    [pscustomobject]@{ Name = 'cua-driver-serve'; Path = '\'; Enabled = $true; Logon = $true },
+    [pscustomobject]@{ Name = 'StartCN'; Path = '\'; Enabled = $true; Logon = $true },
+    [pscustomobject]@{ Name = 'StartDVR'; Path = '\'; Enabled = $true; Logon = $true }
+)
+$logonNames = @(Select-ExtraLogonTaskNames -Tasks $logonTasks -Apps $logonApps -SkipName 'PC Maintenance Kit - Weekly Full')
+Assert-True ($logonNames.Count -eq 1 -and $logonNames[0] -eq 'Steam Client') 'Sign-in list keeps readable app names and skips internal task ids'
+Assert-True ((Format-LogonTaskList @('Steam Client')) -eq 'Also signs in: Steam Client') 'Sign-in list names the task'
+Assert-True (Test-StartupServiceNameMatch -AppName 'Riot Vanguard' -ServiceName 'vgc' -DisplayName 'vgc' -PathName '"C:\Program Files\Riot Vanguard\vgc.exe"') 'Service match accepts the folder name'
+Assert-True (-not (Test-StartupServiceNameMatch -AppName 'Edge' -ServiceName 'edgeupdate' -DisplayName 'edgeupdate' -PathName 'C:\Program Files\SomeEdgeHelper\tool.exe')) 'Service match does not treat a longer folder name as the app'
+$plainStart = Get-StartupBackgroundJudgement -ReadOk $true -EnabledCount 1 -AppList '1 starts with Windows: WallpaperEngine' -HoldText '' -LogonText ''
+Assert-True ($plainStart.Status -eq 'Good' -and $plainStart.Fix -eq 'None') 'One startup app with nothing else stays Good'
+$logonStart = Get-StartupBackgroundJudgement -ReadOk $true -EnabledCount 1 -AppList '1 starts with Windows: WallpaperEngine' -HoldText '' -LogonText 'Also signs in: Steam Client'
+Assert-True ($logonStart.Status -eq 'Warn' -and $logonStart.Fix -eq 'OpenStartup') 'An extra sign-in task warns and opens Startup apps'
+Assert-True ($logonStart.Hint -match 'Startup apps' -and $logonStart.Hint -notmatch 'cua') 'The sign-in recommendation is a plain sentence'
+$heldStart = Get-StartupBackgroundJudgement -ReadOk $true -EnabledCount 1 -AppList '1 starts with Windows: WallpaperEngine' -HoldText 'Still starts as a service: Riot Vanguard' -LogonText ''
+Assert-True ($heldStart.Status -eq 'Warn' -and $heldStart.Fix -eq 'OpenServices') 'A service that still starts warns and opens Services'
+Assert-True (Test-TrustedKitDownloadUrl 'https://github.com/singhRamandeep101/PC-Maintenance-Kit/releases/download/v5.5.0/kit.zip') 'GitHub release URL for this repo is trusted'
+Assert-True (-not (Test-TrustedKitDownloadUrl 'https://objects.githubusercontent.com/github-production-release-asset/kit.zip')) 'A GitHub CDN address is not approved by itself'
+Assert-True (-not (Test-TrustedKitDownloadUrl 'http://github.com/singhRamandeep101/PC-Maintenance-Kit/releases/download/v5.5.0/kit.zip')) 'Plain http download is refused'
+Assert-True (-not (Test-TrustedKitDownloadUrl 'https://github.com/other/PC-Maintenance-Kit/releases/download/v5.5.0/kit.zip')) 'Another GitHub repo is refused'
+Assert-True (-not (Test-TrustedKitDownloadUrl 'https://evil.example/kit.zip')) 'An unknown host is refused'
+$zipDir = Join-Path $env:TEMP ('pcmk-zip-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Path $zipDir -Force | Out-Null
+$safeZip = Join-Path $zipDir 'safe.zip'
+$slipZip = Join-Path $zipDir 'slip.zip'
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$safeStream = [System.IO.File]::Open($safeZip, 'Create')
+$safeArchive = New-Object System.IO.Compression.ZipArchive($safeStream, [System.IO.Compression.ZipArchiveMode]::Create)
+[void]$safeArchive.CreateEntry('PC-Maintenance.ps1')
+$safeArchive.Dispose()
+$safeStream.Dispose()
+$slipStream = [System.IO.File]::Open($slipZip, 'Create')
+$slipArchive = New-Object System.IO.Compression.ZipArchive($slipStream, [System.IO.Compression.ZipArchiveMode]::Create)
+[void]$slipArchive.CreateEntry('..\evil.ps1')
+$slipArchive.Dispose()
+$slipStream.Dispose()
+Assert-True (Test-ZipEntriesSafe -ZipPath $safeZip -Destination (Join-Path $zipDir 'out')) 'A normal ZIP entry is safe to extract'
+Assert-True (-not (Test-ZipEntriesSafe -ZipPath $slipZip -Destination (Join-Path $zipDir 'out'))) 'A ZIP entry that escapes the folder is refused'
+Remove-Item -LiteralPath $zipDir -Recurse -Force -EA SilentlyContinue
+$staleHeadline = Get-DisplayedOptimizationScore -WeightedScore 90 -ScanStatus 'Bad'
+Assert-True ($staleHeadline.Score -eq 69 -and $staleHeadline.Weighted -eq 90) 'A stale scan holds a 90 at Needs work and keeps the weighted total'
+Assert-True ((Get-OptimizationGrade $staleHeadline.Score) -eq 'Needs work') 'A stale scan headline grade is Needs work'
+Assert-True ($staleHeadline.Note -match '20 days') 'A stale scan explains the hold'
+$freshHeadline = Get-DisplayedOptimizationScore -WeightedScore 90 -ScanStatus 'Good'
+Assert-True ($freshHeadline.Score -eq 90 -and [string]::IsNullOrEmpty($freshHeadline.Note)) 'A recent scan leaves the weighted score alone'
+$unknownHeadline = Get-DisplayedOptimizationScore -WeightedScore 90 -ScanStatus 'Unknown'
+Assert-True ($unknownHeadline.Score -eq 90) 'An unreadable scan does not hold the headline'
+$lowHeadline = Get-DisplayedOptimizationScore -WeightedScore 40 -ScanStatus 'Bad'
+Assert-True ($lowHeadline.Score -eq 40) 'A score already under Needs work is not raised'
 
 # lib scripts are discovered from disk so a new file cannot skip the syntax gate
 $parseFiles = @('PC-Maintenance.ps1', 'Get.ps1', 'Build-Release.ps1')
@@ -641,6 +792,10 @@ foreach ($rel in $parseFiles) {
 
 $getRaw = Get-Content -LiteralPath (Join-Path $Root 'Get.ps1') -Raw
 Assert-True ($getRaw -match 'Test-Sha256File') 'Get.ps1 verifies SHA256'
+Assert-True ($getRaw -match 'function Test-TrustedKitDownloadUrl') 'Get.ps1 checks the download address'
+Assert-True ($getRaw -match 'Refusing to download from an unexpected address') 'Get.ps1 refuses an unexpected download address'
+Assert-True ($getRaw -match 'function Test-ZipEntriesSafe') 'Get.ps1 checks ZIP entries'
+Assert-True ($getRaw -match 'escapes the folder') 'Get.ps1 refuses a ZIP entry that escapes the folder'
 Assert-True ($getRaw -match 'Refusing to install without integrity') 'Get.ps1 fails closed without SHA256'
 Assert-True ($getRaw -notmatch 'refs/heads/main\.zip') 'Get.ps1 no longer falls back to main.zip'
 Assert-True ($getRaw -match 'Could not fetch GitHub release info') 'Get.ps1 surfaces network/API errors'
@@ -766,6 +921,7 @@ Assert-True ($careRaw -match 'Unblock-File') 'Weekly task clears the download ma
 $pmRaw = Get-Content -LiteralPath (Join-Path $Root 'PC-Maintenance.ps1') -Raw
 Assert-True ($pmRaw -match "ValidateSet\([^\)]*'Scheduled'") 'Entry script accepts -Mode Scheduled'
 Assert-True ($pmRaw -match 'lib\\Care\.ps1') 'Entry script loads Care.ps1'
+Assert-True ($pmRaw -match 'lib\\Security\.ps1') 'Entry script loads Security.ps1'
 Assert-True ($pmRaw -match 'Apply-ScheduledCareFlags') 'Scheduled mode applies care flags'
 Assert-True ($pmRaw -match 'HeadlessRun') 'Scheduled mode is marked headless'
 
@@ -780,11 +936,18 @@ Assert-True ($guiRaw2 -match 'GuiPages\.ps1') 'GUI loads GuiPages module'
 Assert-True ($guiRaw2 -match 'BtnPresetGamer') 'GUI wires care presets'
 Assert-True ($guiRaw2 -match 'Unknown option. Nothing was run') 'CLI rejects an unknown menu choice'
 Assert-True ($guiRaw2 -match 'BtnRestorePower') 'GUI can restore the previous power plan'
+Assert-True ($guiRaw2 -match 'function Update-GuiPageOnVisit') 'Opening a tab can refresh a stale page'
+Assert-True ($guiRaw2 -match 'Set-ActiveNav \(\[string\]\$sender\.Text\) -FromUser') 'Nav clicks are the visits that refresh'
 Assert-True ($extrasRaw -notmatch 'EpicGamesLauncher\\Saved\\Data') 'Epic cleanup does not wipe Saved\Data'
+Assert-True ($coreRaw -notmatch 'Microsoft\\Windows\\INetCache') 'Temp cleanup leaves Windows Internet cache alone'
+Assert-True ($coreRaw -notmatch 'Microsoft\\Windows\\WebCache') 'Temp cleanup leaves the WebCache database alone'
+Assert-True ($extrasRaw -notmatch 'Microsoft\\Windows\\INetCache') 'Cleanup preview leaves Windows Internet cache alone'
+Assert-True ($extrasRaw -notmatch 'Microsoft\\Windows\\WebCache') 'Cleanup preview leaves the WebCache database alone'
 
 $pagesRaw = Get-Content -LiteralPath (Join-Path $Root 'lib\GuiPages.ps1') -Raw
 Assert-True ($pagesRaw -match 'function Add-GuiHomePage') 'GuiPages has Home builder'
 Assert-True ($pagesRaw -match 'function Add-GuiGamingPage') 'GuiPages has Gaming builder'
+Assert-True ($pagesRaw -match 'function Add-GuiSecurityPage') 'GuiPages has Security builder'
 Assert-True ($pagesRaw -match 'ChkScheduleWeekly') 'Home page has schedule checkbox'
 Assert-True ($pagesRaw -match 'GetNewClosure') 'GuiPages Resize handlers capture locals with GetNewClosure'
 Assert-True ($pagesRaw -notmatch 'Anchor = "Top,Left,Right"') 'Pages do not anchor controls that a resize handler also sizes'

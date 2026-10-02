@@ -233,9 +233,7 @@ function Get-CleanupPreview {
         $env:TEMP,
         "$env:LOCALAPPDATA\Temp",
         $(if (Get-Command Get-WindowsTempPath -EA SilentlyContinue) { Get-WindowsTempPath } else { 'C:\Windows\Temp' }),
-        "$env:LOCALAPPDATA\CrashDumps",
-        "$env:LOCALAPPDATA\Microsoft\Windows\INetCache",
-        "$env:LOCALAPPDATA\Microsoft\Windows\WebCache"
+        "$env:LOCALAPPDATA\CrashDumps"
     )
     $tempPaths = if (Get-Command Select-UniqueCleanupPaths -EA SilentlyContinue) {
         @(Select-UniqueCleanupPaths -Paths $tempRaw)
@@ -523,6 +521,47 @@ function Test-KitPayloadHealthy {
     }
 }
 
+function Test-TrustedKitDownloadUrl([string]$Url) {
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
+    $uri = $null
+    try { $uri = [Uri]$Url } catch { return $false }
+    if ($uri.Scheme -ne 'https') { return $false }
+    $hostName = $uri.Host.ToLowerInvariant()
+    # GitHub's download CDN is not accepted here. The release URL on github.com
+    # is what we approve; the client may follow GitHub's own redirect after that.
+    $repoHosts = @('github.com', 'api.github.com', 'codeload.github.com')
+    $known = $false
+    foreach ($name in $repoHosts) {
+        if ($hostName -eq $name) { $known = $true; break }
+    }
+    if (-not $known) { return $false }
+    $path = $uri.AbsolutePath.ToLowerInvariant()
+    return ($path -like '*/singhramandeep101/pc-maintenance-kit/*' -or $path -like '*/singhramandeep101/pc-maintenance-kit')
+}
+
+function Test-ZipEntriesSafe {
+    param([string]$ZipPath, [string]$Destination)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -EA SilentlyContinue
+    $zip = $null
+    try {
+        $destRoot = [System.IO.Path]::GetFullPath($Destination)
+        if (-not $destRoot.EndsWith('\')) { $destRoot = $destRoot + '\' }
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+        foreach ($entry in $zip.Entries) {
+            $name = ([string]$entry.FullName).Replace('/', '\')
+            if ([string]::IsNullOrWhiteSpace($name)) { continue }
+            if ($name.StartsWith('\') -or $name.StartsWith('..') -or $name.Contains('..\')) { return $false }
+            $target = [System.IO.Path]::GetFullPath((Join-Path $Destination $name.TrimStart('\')))
+            if (-not $target.StartsWith($destRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+        }
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($zip) { $zip.Dispose() }
+    }
+}
+
 function Get-GitHubLatestRelease {
     param([string]$Repo = $Script:GitHubRepo)
     try {
@@ -634,6 +673,12 @@ function Invoke-AppSelfUpdate {
     if (-not $Release.ZipUrl) {
         throw "This GitHub release has no ZIP attached. Re-publish the release with the build ZIP."
     }
+    if (-not (Test-TrustedKitDownloadUrl ([string]$Release.ZipUrl))) {
+        throw "Refusing to download from an unexpected address."
+    }
+    if ($Release.Sha256Url -and -not (Test-TrustedKitDownloadUrl ([string]$Release.Sha256Url))) {
+        $Release.Sha256Url = $null
+    }
     if (-not $Script:AppRoot -or -not (Test-Path -LiteralPath $Script:AppRoot)) {
         throw "App folder not found."
     }
@@ -715,6 +760,9 @@ function Invoke-AppSelfUpdate {
     Write-Info "Extracting update..."
     Set-UiStatusText "Extracting update..."
     Pump-Ui
+    if (-not (Test-ZipEntriesSafe -ZipPath $zipPath -Destination $extract)) {
+        throw "Refusing to extract this ZIP because an entry escapes the folder."
+    }
     Expand-Archive -LiteralPath $zipPath -DestinationPath $extract -Force
 
     $payloadRoot = Resolve-KitPayloadRoot -Extract $extract

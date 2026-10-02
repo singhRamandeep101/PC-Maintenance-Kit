@@ -14,7 +14,7 @@ function New-OptimizationCheck {
         [string]$Title,
         [string]$Detail,
         [string]$FixHint = '',
-        [ValidateSet('GamingOptimize','OpenStorage','CopyRamTip','OpenStartup','OpenDisplay','None')]$FixAction = 'None'
+        [ValidateSet('GamingOptimize','OpenStorage','CopyRamTip','OpenStartup','OpenServices','OpenTasks','OpenDisplay','OpenSecurity','None')]$FixAction = 'None'
     )
     return [pscustomobject]@{
         Id        = $Id
@@ -118,26 +118,494 @@ function Get-GpuDriverInfo {
     return $info
 }
 
-function Get-StartupEntryCount {
+function Test-StartupApprovedEnabled {
+    param($Bytes)
+    # No StartupApproved value means Windows still launches it.
+    # An odd first byte (1, 3, 7) is the off switch in Settings > Startup apps.
+    if ($null -eq $Bytes) { return $true }
+    $first = $null
+    if ($Bytes -is [System.Array]) {
+        $items = @($Bytes)
+        if ($items.Count -lt 1) { return $true }
+        $first = [int]$items[0]
+    } else {
+        try { $first = [int]$Bytes } catch { return $true }
+    }
+    return (($first -band 1) -eq 0)
+}
+
+function Get-StartupApprovedBytes {
+    param([string]$Key, [string]$Name)
+    if (-not $Key -or -not $Name -or -not (Test-Path -LiteralPath $Key)) { return $null }
+    try {
+        # GetValue is literal. Get-ItemProperty -Name treats [ and * as wildcards.
+        $item = Get-Item -LiteralPath $Key -EA Stop
+        return $item.GetValue($Name, $null)
+    } catch { }
+    return $null
+}
+
+function Select-StartupAppWinners {
+    param([object[]]$Items)
+    $found = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    # Index the array. foreach over PSCustomObject rows throws
+    # "Argument types do not match" in Windows PowerShell 5.1.
     $count = 0
-    $paths = @(
-        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run',
-        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'
+    if ($null -ne $Items) { $count = $Items.Count }
+    for ($i = 0; $i -lt $count; $i++) {
+        $item = $Items[$i]
+        if (-not $item) { continue }
+        $clean = ([string]$item.Name).Trim()
+        if (-not $clean) { continue }
+        $key = $clean.ToLowerInvariant()
+        $enabled = [bool]$item.Enabled
+        if ($seen.ContainsKey($key)) {
+            # A disabled Run entry must not hide the same app starting from
+            # the Startup folder or a Store task.
+            if ($enabled -and -not $seen[$key].Enabled) {
+                $seen[$key].Enabled = $true
+                if ($item.Source) { $seen[$key].Source = [string]$item.Source }
+            }
+            continue
+        }
+        $row = [pscustomobject]@{
+            Name    = $clean
+            Enabled = $enabled
+            Source  = [string]$item.Source
+        }
+        $seen[$key] = $row
+        [void]$found.Add($row)
+    }
+    return @($found.ToArray())
+}
+
+function Format-StartupPackageName {
+    param([string]$Family, [string]$Task)
+    if ($Task -and $Task -notmatch '^[0-9a-fA-F-]{36}$') { return $Task }
+    $base = [string]$Family
+    $under = $base.IndexOf('_')
+    if ($under -gt 0) { $base = $base.Substring(0, $under) }
+    $dot = $base.LastIndexOf('.')
+    if ($dot -ge 0 -and $dot -lt ($base.Length - 1)) { return $base.Substring($dot + 1) }
+    if ($base) { return $base }
+    return $Task
+}
+
+function Get-StartupApps {
+    $raw = New-Object System.Collections.Generic.List[object]
+
+    function Add-StartupApp([string]$Name, [bool]$Enabled, [string]$Source) {
+        $clean = ([string]$Name).Trim()
+        if (-not $clean) { return }
+        [void]$raw.Add([pscustomobject]@{
+            Name    = $clean
+            Enabled = $Enabled
+            Source  = $Source
+        })
+    }
+
+    function Test-StartupRunOn {
+        param([string[]]$ApprovedKeys, [string]$Name)
+        foreach ($key in @($ApprovedKeys)) {
+            $bytes = Get-StartupApprovedBytes -Key $key -Name $Name
+            if ($null -eq $bytes) { continue }
+            if (-not (Test-StartupApprovedEnabled $bytes)) { return $false }
+        }
+        return $true
+    }
+
+    $runSources = @(
+        @{ Run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; Approved = @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'); Source = 'User' },
+        @{ Run = 'HKCU:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run'; Approved = @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'); Source = 'User' },
+        @{ Run = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'; Approved = @('HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'); Source = 'Machine' },
+        @{ Run = 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run'; Approved = @('HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'); Source = 'Machine' }
     )
-    foreach ($p in $paths) {
+    foreach ($src in $runSources) {
         try {
-            if (Test-Path $p) {
-                $props = Get-ItemProperty $p -EA SilentlyContinue
-                if ($props) {
-                    $names = $props.PSObject.Properties.Name | Where-Object {
-                        $_ -notin @('PSPath','PSParentPath','PSChildName','PSDrive','PSProvider')
-                    }
-                    $count += @($names).Count
-                }
+            if (-not (Test-Path -LiteralPath $src.Run)) { continue }
+            $props = Get-ItemProperty -Path $src.Run -EA SilentlyContinue
+            if (-not $props) { continue }
+            foreach ($prop in @($props.PSObject.Properties)) {
+                if ($prop.Name -like 'PS*') { continue }
+                $on = Test-StartupRunOn -ApprovedKeys $src.Approved -Name $prop.Name
+                Add-StartupApp $prop.Name $on $src.Source
             }
         } catch { }
     }
-    return $count
+
+    $folders = @(
+        @{ Path = (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'); Approved = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder'; Source = 'User folder' },
+        @{ Path = (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Startup'); Approved = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder'; Source = 'Common folder' }
+    )
+    foreach ($folder in $folders) {
+        try {
+            if (-not $folder.Path -or -not (Test-Path -LiteralPath $folder.Path)) { continue }
+            Get-ChildItem -LiteralPath $folder.Path -File -EA SilentlyContinue | ForEach-Object {
+                if ($_.Name -eq 'desktop.ini') { return }
+                $leaf = $_.BaseName
+                $bytes = Get-StartupApprovedBytes -Key $folder.Approved -Name $_.Name
+                if ($null -eq $bytes) { $bytes = Get-StartupApprovedBytes -Key $folder.Approved -Name $leaf }
+                Add-StartupApp $leaf (Test-StartupApprovedEnabled $bytes) $folder.Source
+            }
+        } catch { }
+    }
+
+    $appRoot = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\SystemAppData'
+    $skipKids = @('HAM', 'PSR', 'Schemas', 'SplashScreen', 'PersistedPickerData')
+    try {
+        if (Test-Path -LiteralPath $appRoot) {
+            Get-ChildItem -LiteralPath $appRoot -EA SilentlyContinue | ForEach-Object {
+                $family = $_.PSChildName
+                Get-ChildItem -LiteralPath $_.PSPath -EA SilentlyContinue | ForEach-Object {
+                    if ($skipKids -contains $_.PSChildName) { return }
+                    $taskProp = $null
+                    try { $taskProp = Get-ItemProperty -LiteralPath $_.PSPath -EA SilentlyContinue } catch { }
+                    if (-not $taskProp -or -not $taskProp.PSObject.Properties['UserEnabledStartupOnce']) { return }
+                    if (-not $taskProp.PSObject.Properties['State']) { return }
+                    $state = $taskProp.State
+                    $on = ($state -eq 2 -or $state -eq 4)
+                    $label = Format-StartupPackageName -Family $family -Task $_.PSChildName
+                    Add-StartupApp $label $on 'Windows app'
+                }
+            }
+        }
+    } catch { }
+
+    return @(Select-StartupAppWinners $raw | Sort-Object Name)
+}
+
+function Get-StartupEntryCount {
+    return @(@(Get-StartupApps) | Where-Object { $_.Enabled }).Count
+}
+
+function Test-ServicePathIsWindows([string]$PathName) {
+    if ([string]::IsNullOrWhiteSpace($PathName)) { return $true }
+    $path = $PathName.Trim()
+    if ($path.StartsWith('"')) {
+        $end = $path.IndexOf('"', 1)
+        if ($end -gt 1) { $path = $path.Substring(1, $end - 1) }
+        else { $path = $path.Trim('"') }
+    }
+    $root = $env:SystemRoot
+    if ([string]::IsNullOrWhiteSpace($root)) { $root = 'C:\Windows' }
+    $rootFull = $root
+    try { $rootFull = [System.IO.Path]::GetFullPath($root) } catch { }
+    $prefix = $rootFull.TrimEnd('\') + '\'
+    return $path.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-StartupTokenBoundary {
+    param([string]$Haystack, [string]$Needle)
+    if (-not $Haystack -or -not $Needle) { return $false }
+    $idx = $Haystack.IndexOf($Needle)
+    while ($idx -ge 0) {
+        $beforeOk = ($idx -eq 0) -or ($Haystack[$idx - 1] -notmatch '[a-z0-9]')
+        $after = $idx + $Needle.Length
+        $afterOk = ($after -ge $Haystack.Length) -or ($Haystack[$after] -notmatch '[a-z0-9]')
+        if ($beforeOk -and $afterOk) { return $true }
+        if (($idx + 1) -ge $Haystack.Length) { break }
+        $idx = $Haystack.IndexOf($Needle, $idx + 1)
+    }
+    return $false
+}
+
+function Test-StartupServiceNameMatch {
+    param(
+        [string]$AppName,
+        [string]$ServiceName,
+        [string]$DisplayName,
+        [string]$PathName
+    )
+    # Whole name or a path segment. "Edge" must not match "SomeEdgeHelper",
+    # and "Update" must not match "WindowsUpdate".
+    $app = ([string]$AppName).Trim()
+    if ($app.Length -lt 4) { return $false }
+    $appKey = $app.ToLowerInvariant()
+    $dispKey = ([string]$DisplayName).Trim().ToLowerInvariant()
+    $svcKey = ([string]$ServiceName).Trim().ToLowerInvariant()
+    if ($dispKey -eq $appKey -or $svcKey -eq $appKey) { return $true }
+    if ($dispKey.Length -ge 4 -and (Test-StartupTokenBoundary $dispKey $appKey)) { return $true }
+    $pathOnly = [string]$PathName
+    if ($pathOnly.StartsWith('"')) {
+        $end = $pathOnly.IndexOf('"', 1)
+        if ($end -gt 1) { $pathOnly = $pathOnly.Substring(1, $end - 1) }
+    }
+    $segments = @($pathOnly.ToLowerInvariant() -split '[\\/]+')
+    foreach ($seg in $segments) {
+        if (-not $seg) { continue }
+        $leaf = $seg
+        if ($leaf.EndsWith('.exe') -or $leaf.EndsWith('.dll')) {
+            $leaf = $leaf.Substring(0, $leaf.Length - 4)
+        }
+        if ($leaf -eq $appKey) { return $true }
+    }
+    return $false
+}
+
+function Resolve-ServiceBinaryPath {
+    param([string]$ServiceName, [string]$PathName)
+    $path = [string]$PathName
+    if ($path -notmatch 'svchost\.exe') { return $path }
+    if (-not $ServiceName) { return $path }
+    $safeName = $ServiceName.Trim()
+    if ($safeName -notmatch '^[A-Za-z0-9_.-]+$') { return $path }
+    $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$safeName\Parameters"
+    try {
+        $item = Get-Item -LiteralPath $key -EA Stop
+        $dll = $item.GetValue('ServiceDll', $null)
+        if ($dll) { return [Environment]::ExpandEnvironmentVariables([string]$dll) }
+    } catch { }
+    return $path
+}
+
+function Select-StartupServiceHolds {
+    param([object[]]$Apps, [object[]]$Services)
+    # A Startup apps toggle does not stop an automatic service outside Windows.
+    $found = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    $appCount = 0
+    if ($null -ne $Apps) { $appCount = $Apps.Count }
+    $svcCount = 0
+    if ($null -ne $Services) { $svcCount = $Services.Count }
+    for ($i = 0; $i -lt $appCount; $i++) {
+        $app = $Apps[$i]
+        if (-not $app -or $app.Enabled) { continue }
+        $name = ([string]$app.Name).Trim()
+        if (-not $name) { continue }
+        $key = $name.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        for ($j = 0; $j -lt $svcCount; $j++) {
+            $svc = $Services[$j]
+            if (-not $svc) { continue }
+            if (Test-ServicePathIsWindows ([string]$svc.PathName)) { continue }
+            if (Test-StartupServiceNameMatch -AppName $name -ServiceName ([string]$svc.Name) -DisplayName ([string]$svc.DisplayName) -PathName ([string]$svc.PathName)) {
+                $seen[$key] = $true
+                [void]$found.Add($name)
+                break
+            }
+        }
+    }
+    return @($found.ToArray())
+}
+
+function Get-AutoStartServices {
+    param([switch]$Refresh)
+    if (-not $Refresh -and $Script:AutoServiceCache -and (([datetime]::UtcNow - $Script:AutoServiceCacheUtc).TotalSeconds -lt 10)) {
+        return @($Script:AutoServiceCache)
+    }
+    $found = New-Object System.Collections.Generic.List[object]
+    try {
+        Get-CimInstance -ClassName Win32_Service -Filter "StartMode='Auto'" -EA Stop | ForEach-Object {
+            $image = Resolve-ServiceBinaryPath -ServiceName ([string]$_.Name) -PathName ([string]$_.PathName)
+            [void]$found.Add([pscustomobject]@{
+                Name        = [string]$_.Name
+                DisplayName = [string]$_.DisplayName
+                PathName    = [string]$image
+            })
+        }
+    } catch { }
+    $Script:AutoServiceCache = @($found.ToArray())
+    $Script:AutoServiceCacheUtc = [datetime]::UtcNow
+    return @($Script:AutoServiceCache)
+}
+
+function Get-StartupServiceHolds {
+    param($Apps, [switch]$Refresh)
+    return @(Select-StartupServiceHolds -Apps $Apps -Services (Get-AutoStartServices -Refresh:$Refresh))
+}
+
+function Format-StartupServiceHoldList {
+    param([string[]]$Names, [int]$MaxNames = 4)
+    $count = 0
+    if ($null -ne $Names) { $count = $Names.Count }
+    if ($count -lt 1) { return '' }
+    $shown = New-Object System.Collections.Generic.List[string]
+    $limit = $MaxNames
+    if ($limit -gt $count) { $limit = $count }
+    for ($i = 0; $i -lt $limit; $i++) {
+        [void]$shown.Add([string]$Names[$i])
+    }
+    $text = ($shown -join ', ')
+    $extra = $count - $limit
+    if ($extra -gt 0) { $text = ("{0}, and {1} more" -f $text, $extra) }
+    return ("Still starts as a service: {0}" -f $text)
+}
+
+function Select-ExtraLogonTaskNames {
+    param([object[]]$Tasks, [object[]]$Apps, [string]$SkipName)
+    $enabled = @{}
+    $appCount = 0
+    if ($null -ne $Apps) { $appCount = $Apps.Count }
+    for ($i = 0; $i -lt $appCount; $i++) {
+        $app = $Apps[$i]
+        if (-not $app -or -not $app.Enabled) { continue }
+        $key = ([string]$app.Name).Trim().ToLowerInvariant()
+        if ($key) { $enabled[$key] = $true }
+    }
+    $found = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    $taskCount = 0
+    if ($null -ne $Tasks) { $taskCount = $Tasks.Count }
+    for ($i = 0; $i -lt $taskCount; $i++) {
+        $task = $Tasks[$i]
+        if (-not $task -or -not $task.Enabled -or -not $task.Logon) { continue }
+        $path = [string]$task.Path
+        if ($path.StartsWith('\Microsoft\', [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+        $name = ([string]$task.Name).Trim()
+        if (-not $name) { continue }
+        if ($SkipName -and ($name -eq $SkipName)) { continue }
+        if (-not (Test-ReadableSignInName $name)) { continue }
+        $key = $name.ToLowerInvariant()
+        if ($enabled.ContainsKey($key) -or $seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        [void]$found.Add($name)
+    }
+    return @($found.ToArray())
+}
+
+function Get-ExtraLogonTaskNames {
+    param($Apps, [switch]$Refresh)
+    if (-not $Refresh -and $Script:LogonTaskCache -and (([datetime]::UtcNow - $Script:LogonTaskCacheUtc).TotalSeconds -lt 10)) {
+        return @(Select-ExtraLogonTaskNames -Tasks $Script:LogonTaskCache -Apps $Apps -SkipName $Script:LogonTaskSkipName)
+    }
+    $rows = New-Object System.Collections.Generic.List[object]
+    try {
+        Get-ScheduledTask -EA Stop | ForEach-Object {
+            $logon = $false
+            try {
+                foreach ($trigger in @($_.Triggers)) {
+                    if (-not $trigger) { continue }
+                    $class = ''
+                    try { $class = [string]$trigger.CimClass.CimClassName } catch { $class = '' }
+                    if ($class -match 'Logon') { $logon = $true; break }
+                }
+            } catch { }
+            $enabled = $false
+            try { $enabled = ([string]$_.State -ne 'Disabled') } catch { }
+            [void]$rows.Add([pscustomobject]@{
+                Name    = [string]$_.TaskName
+                Path    = [string]$_.TaskPath
+                Enabled = [bool]$enabled
+                Logon   = [bool]$logon
+            })
+        }
+    } catch { }
+    $skip = 'PC Maintenance Kit - Weekly Full'
+    if ($Script:WeeklyCareTaskName) { $skip = [string]$Script:WeeklyCareTaskName }
+    $Script:LogonTaskCache = @($rows.ToArray())
+    $Script:LogonTaskCacheUtc = [datetime]::UtcNow
+    $Script:LogonTaskSkipName = $skip
+    return @(Select-ExtraLogonTaskNames -Tasks $Script:LogonTaskCache -Apps $Apps -SkipName $skip)
+}
+
+function Test-ReadableSignInName([string]$Name) {
+    # Scheduled tasks are often ids like cua-driver-serve or StartDVR.
+    # A name a person can read has a space: "Steam Client".
+    $n = ([string]$Name).Trim()
+    if ($n.Length -lt 4) { return $false }
+    if ($n -notmatch '\s') { return $false }
+    if ($n -match '[\\/_{}@]|-{2,}|\d{4,}') { return $false }
+    return $true
+}
+
+function Format-LogonTaskList {
+    param([string[]]$Names, [int]$MaxNames = 4)
+    $count = 0
+    if ($null -ne $Names) { $count = $Names.Count }
+    if ($count -lt 1) { return '' }
+    $shown = New-Object System.Collections.Generic.List[string]
+    $limit = $MaxNames
+    if ($limit -gt $count) { $limit = $count }
+    for ($i = 0; $i -lt $limit; $i++) {
+        [void]$shown.Add([string]$Names[$i])
+    }
+    $text = ($shown -join ', ')
+    $extra = $count - $limit
+    if ($extra -gt 0) { $text = ("{0}, and {1} more" -f $text, $extra) }
+    return ("Also signs in: {0}" -f $text)
+}
+
+function Get-StartupBackgroundJudgement {
+    param(
+        [bool]$ReadOk,
+        [int]$EnabledCount,
+        [string]$AppList,
+        [string]$HoldText,
+        [string]$LogonText,
+        [double]$MaxPoints = 100
+    )
+    if (-not $ReadOk) {
+        return [pscustomobject]@{
+            Points = $MaxPoints
+            Status = 'Unknown'
+            Detail = 'Startup apps could not be read'
+            Hint   = ''
+            Fix    = 'None'
+        }
+    }
+    $score = $MaxPoints
+    $status = 'Good'
+    $detail = [string]$AppList
+    $fix = 'None'
+    $hint = ''
+    if ($EnabledCount -le 5) {
+        $score = $MaxPoints
+        $status = 'Good'
+    } elseif ($EnabledCount -le 12) {
+        $score = $MaxPoints * 0.55
+        $status = 'Warn'
+        $detail = ("{0}  -  turn off the ones you don't need" -f $AppList)
+        $fix = 'OpenStartup'
+        $hint = $detail
+    } else {
+        $score = $MaxPoints * 0.2
+        $status = 'Bad'
+        $detail = ("{0}  -  heavy background load" -f $AppList)
+        $fix = 'OpenStartup'
+        $hint = $detail
+    }
+    if ($HoldText) {
+        if ($status -eq 'Good') {
+            $score = $MaxPoints * 0.55
+            $status = 'Warn'
+        }
+        $detail = ("{0}`r`n{1}" -f $AppList, $HoldText)
+        $fix = 'OpenServices'
+        $hint = $HoldText
+    }
+    if ($LogonText) {
+        $detail = $detail + "`r`n" + $LogonText
+        if ($status -eq 'Good') {
+            $score = $MaxPoints * 0.7
+            $status = 'Warn'
+        }
+        if ($fix -eq 'None') {
+            $fix = 'OpenStartup'
+            $hint = 'Extra programs sign in with Windows. Open Startup apps and turn off what you do not use.'
+        }
+    }
+    return [pscustomobject]@{
+        Points = $score
+        Status = $status
+        Detail = $detail
+        Hint   = $hint
+        Fix    = $fix
+    }
+}
+
+function Format-StartupAppList {
+    param($Apps, [int]$MaxNames = 6)
+    $enabled = @($Apps | Where-Object { $_.Enabled })
+    if ($enabled.Count -eq 0) { return 'Nothing is set to start with Windows' }
+    $names = @($enabled | ForEach-Object { [string]$_.Name })
+    $shown = @($names | Select-Object -First $MaxNames)
+    $text = ($shown -join ', ')
+    $extra = $names.Count - $shown.Count
+    if ($extra -gt 0) { $text = ("{0}, and {1} more" -f $text, $extra) }
+    $verb = 'start'
+    if ($enabled.Count -eq 1) { $verb = 'starts' }
+    return ("{0} {1} with Windows: {2}" -f $enabled.Count, $verb, $text)
 }
 
 function Get-HagsEnabled {
@@ -150,11 +618,102 @@ function Get-HagsEnabled {
     }
 }
 
+function Get-SecurityScanFreshness {
+    param(
+        $LastScan,
+        [bool]$Known = $true,
+        [int]$MaxAgeDays = 20,
+        [double]$MaxPoints = 100
+    )
+    # A missed read stays full points. Only a scan older than the window,
+    # or no scan on record, marks this check Bad.
+    if (-not $Known) {
+        return [pscustomobject]@{
+            Points = $MaxPoints
+            Status = 'Unknown'
+            Detail = 'Defender scan time could not be read'
+            Hint   = ''
+        }
+    }
+    $when = $null
+    if ($LastScan -is [datetime] -and $LastScan.Year -ge 2000) { $when = $LastScan }
+    if (-not $when) {
+        return [pscustomobject]@{
+            Points = 0
+            Status = 'Bad'
+            Detail = 'No Defender scan on record'
+            Hint   = 'Run a scan in Windows Security'
+        }
+    }
+    $age = [int]([datetime]::Now - $when).TotalDays
+    if ($age -lt 0) { $age = 0 }
+    if ($age -le $MaxAgeDays) {
+        $whenText = 'today'
+        if ($age -eq 1) { $whenText = '1 day ago' }
+        elseif ($age -gt 1) { $whenText = ("{0} days ago" -f $age) }
+        return [pscustomobject]@{
+            Points = $MaxPoints
+            Status = 'Good'
+            Detail = ("Last Defender scan was {0}" -f $whenText)
+            Hint   = ''
+        }
+    }
+    return [pscustomobject]@{
+        Points = 0
+        Status = 'Bad'
+        Detail = ("Last Defender scan was {0} days ago" -f $age)
+        Hint   = 'Run a scan in Windows Security'
+    }
+}
+
 function Get-OptimizationGrade([int]$Score) {
     if ($Score -ge 85) { return 'Excellent' }
     if ($Score -ge 70) { return 'Good' }
     if ($Score -ge 50) { return 'Needs work' }
     return 'Critical'
+}
+
+function Get-DisplayedOptimizationScore {
+    param(
+        [int]$WeightedScore,
+        [string]$ScanStatus
+    )
+    # Category weights stay as they are. A scan older than 20 days still
+    # holds the headline at Needs work, so a tuned PC cannot stay Excellent.
+    $score = $WeightedScore
+    if ($score -lt 0) { $score = 0 }
+    if ($score -gt 100) { $score = 100 }
+    $weighted = $score
+    $note = ''
+    if ($ScanStatus -eq 'Bad' -and $score -gt 69) {
+        $score = 69
+        $note = ("Held at Needs work because the last Defender scan is older than 20 days. Weighted total was {0}." -f $weighted)
+    }
+    return [pscustomobject]@{
+        Score    = $score
+        Weighted = $weighted
+        Note     = $note
+    }
+}
+
+function Get-BiggestScoreLimiter {
+    param([object[]]$Categories)
+    # Points lost = weight times how far the category is from 100.
+    # A small category at a low percent must not outrank a heavier one.
+    $bestName = 'None'
+    $bestImpact = -1.0
+    $count = 0
+    if ($null -ne $Categories) { $count = $Categories.Count }
+    for ($i = 0; $i -lt $count; $i++) {
+        $cat = $Categories[$i]
+        if (-not $cat) { continue }
+        $impact = [double]$cat.Weight * (100.0 - [double]$cat.Score)
+        if ($impact -gt $bestImpact) {
+            $bestImpact = $impact
+            $bestName = [string]$cat.Name
+        }
+    }
+    return $bestName
 }
 
 function Get-DiskMediaScore {
@@ -199,7 +758,8 @@ function Get-DiskMediaScore {
 function Get-GamingOptimizationScore {
     param([switch]$Refresh)
 
-    if (-not $Refresh -and $Script:OptimizationScoreCache -and (([datetime]::UtcNow - $Script:OptimizationScoreCacheUtc).TotalSeconds -lt 600)) {
+    # Short on purpose. Hardware probes keep their own longer cache.
+    if (-not $Refresh -and $Script:OptimizationScoreCache -and (([datetime]::UtcNow - $Script:OptimizationScoreCacheUtc).TotalSeconds -lt 10)) {
         return $Script:OptimizationScoreCache
     }
 
@@ -213,7 +773,7 @@ function Get-GamingOptimizationScore {
         Write-Warn ("Score could not read the device summary: {0}" -f $_.Exception.Message)
     }
 
-    # ---- Storage (weight 0.16) ----
+    # ---- Storage (weight 0.14) ----
     $mediaPts = 40.0
     $freePts = 40.0
     $healthPts = 20.0
@@ -325,7 +885,7 @@ function Get-GamingOptimizationScore {
     [void]$checks.Add((New-OptimizationCheck -Id 'storage_health' -Category 'Storage' -Status $healthStatus `
         -Points $healthScore -Max $healthPts -Title 'Disk health' -Detail $healthDetail))
 
-    # ---- Memory (weight 0.10) ----
+    # ---- Memory (weight 0.09) ----
     $memCapMax = 50.0
     $memChMax = 50.0
     $capScore = 0.0
@@ -398,7 +958,7 @@ function Get-GamingOptimizationScore {
         -Points $chScore -Max $memChMax -Title 'RAM channels' -Detail $chDetail `
         -FixHint $chHint -FixAction $chFix))
 
-    # ---- Power (weight 0.22) ----
+    # ---- Power (weight 0.20) ----
     $powerMax = 100.0
     $powerScore = 0.0
     $powerStatus = 'Unknown'
@@ -442,7 +1002,7 @@ function Get-GamingOptimizationScore {
         -Points $powerScore -Max $powerMax -Title 'Power plan' -Detail $powerDetail `
         -FixHint $powerHint -FixAction $powerFix))
 
-    # ---- DisplayGpu (weight 0.12) ----
+    # ---- DisplayGpu (weight 0.11) ----
     $refMax = 55.0
     $drvMax = 45.0
     $refScore = 0.0
@@ -528,7 +1088,7 @@ function Get-GamingOptimizationScore {
         -Points $drvScore -Max $drvMax -Title 'GPU driver' -Detail $drvDetail `
         -FixHint $drvHint -FixAction $drvFix))
 
-    # ---- GamingFeatures (weight 0.20) ----
+    # ---- GamingFeatures (weight 0.18) ----
     $gmMax = 45.0
     $dvrMax = 40.0
     $hagsMax = 15.0
@@ -604,35 +1164,36 @@ function Get-GamingOptimizationScore {
     [void]$checks.Add((New-OptimizationCheck -Id 'hags' -Category 'GamingFeatures' -Status $hagsStatus `
         -Points $hagsScore -Max $hagsMax -Title 'HAGS' -Detail $hagsDetail))
 
-    # ---- Background (weight 0.14) ----
+    # ---- Background (weight 0.13) ----
     $bgMax = 100.0
-    $startupCount = Get-StartupEntryCount
-    $bgScore = $bgMax
-    $bgStatus = 'Good'
-    $bgDetail = "Startup Run entries: $startupCount"
-    $bgFix = 'None'
-    $bgHint = ''
-    if ($startupCount -le 5) {
-        $bgScore = $bgMax
-        $bgStatus = 'Good'
-    } elseif ($startupCount -le 12) {
-        $bgScore = $bgMax * 0.55
-        $bgStatus = 'Warn'
-        $bgDetail = "Startup Run entries: $startupCount  -  trim unused launchers"
-        $bgFix = 'OpenStartup'
-        $bgHint = 'Disable unused startup apps'
-    } else {
-        $bgScore = $bgMax * 0.2
-        $bgStatus = 'Bad'
-        $bgDetail = "Startup Run entries: $startupCount  -  heavy background load"
-        $bgFix = 'OpenStartup'
-        $bgHint = 'Disable unused startup apps'
+    $startupApps = @()
+    $startupReadOk = $true
+    try { $startupApps = @(Get-StartupApps) } catch {
+        $startupReadOk = $false
+        $startupApps = @()
     }
+    $startupCount = @($startupApps | Where-Object { $_.Enabled }).Count
+    $serviceHolds = @()
+    if ($startupReadOk) {
+        try { $serviceHolds = @(Get-StartupServiceHolds -Apps $startupApps -Refresh:$Refresh) } catch { $serviceHolds = @() }
+    }
+    $holdText = Format-StartupServiceHoldList $serviceHolds
+    $logonText = ''
+    if ($startupReadOk) {
+        try { $logonText = Format-LogonTaskList (Get-ExtraLogonTaskNames -Apps $startupApps -Refresh:$Refresh) } catch { $logonText = '' }
+    }
+    $judged = Get-StartupBackgroundJudgement -ReadOk $startupReadOk -EnabledCount $startupCount `
+        -AppList (Format-StartupAppList $startupApps) -HoldText $holdText -LogonText $logonText -MaxPoints $bgMax
+    $bgScore = $judged.Points
+    $bgStatus = $judged.Status
+    $bgDetail = $judged.Detail
+    $bgFix = $judged.Fix
+    $bgHint = $judged.Hint
     [void]$checks.Add((New-OptimizationCheck -Id 'startup_count' -Category 'Background' -Status $bgStatus `
         -Points $bgScore -Max $bgMax -Title 'Startup programs' -Detail $bgDetail `
         -FixHint $bgHint -FixAction $bgFix))
 
-    # ---- Hygiene (weight 0.06) ----
+    # ---- Hygiene (weight 0.05) ----
     $hygMax = 100.0
     $hygScore = $hygMax
     $hygStatus = 'Good'
@@ -659,25 +1220,47 @@ function Get-GamingOptimizationScore {
     [void]$checks.Add((New-OptimizationCheck -Id 'reboot_pending' -Category 'Hygiene' -Status $hygStatus `
         -Points $hygScore -Max $hygMax -Title 'Pending restart' -Detail $hygDetail))
 
+    # ---- Security (weight 0.10) ----
+    # Scan age only. Real-time protection, signatures, and Malwarebytes stay on
+    # the Security tab. A scan within 20 days keeps full points. Older than that
+    # holds the headline score at Needs work.
+    $secMax = 100.0
+    $secKnown = $false
+    $secWhen = $null
+    try {
+        if (Get-Command Get-SecurityHealth -EA SilentlyContinue) {
+            $health = Get-SecurityHealth -Refresh:$Refresh
+            if ($health -and $health.Defender -and $health.Defender.ScanTimesKnown) {
+                $secKnown = $true
+                $secWhen = $health.Defender.LastScanTime
+            }
+        }
+    } catch { }
+    $scanFresh = Get-SecurityScanFreshness -LastScan $secWhen -Known $secKnown -MaxAgeDays 20 -MaxPoints $secMax
+    $scanFix = 'None'
+    if ($scanFresh.Status -eq 'Bad') { $scanFix = 'OpenSecurity' }
+    [void]$checks.Add((New-OptimizationCheck -Id 'security_scan' -Category 'Security' -Status $scanFresh.Status `
+        -Points $scanFresh.Points -Max $secMax -Title 'Security scan' -Detail $scanFresh.Detail `
+        -FixHint $scanFresh.Hint -FixAction $scanFix))
+
     # ---- Aggregate ----
-    # Settings the kit can change (power, game features, startup, reboot) outweigh
-    # hardware the PC already has (disk type, RAM). Free space still sits in Storage.
+    # Settings the kit can change (power, game features, startup, reboot, scan)
+    # outweigh hardware the PC already has (disk type, RAM). Free space still sits in Storage.
     $weights = @{
-        Storage         = 0.16
-        Memory          = 0.10
-        Power           = 0.22
-        DisplayGpu      = 0.12
-        GamingFeatures  = 0.20
-        Background      = 0.14
-        Hygiene         = 0.06
+        Storage         = 0.14
+        Memory          = 0.09
+        Power           = 0.20
+        DisplayGpu      = 0.11
+        GamingFeatures  = 0.18
+        Background      = 0.13
+        Hygiene         = 0.05
+        Security        = 0.10
     }
 
     $categories = New-Object System.Collections.Generic.List[object]
     $weightedSum = 0.0
-    $lowestCatScore = 101.0
-    $biggestLimiter = 'None'
 
-    foreach ($catName in @('Storage','Memory','Power','DisplayGpu','GamingFeatures','Background','Hygiene')) {
+    foreach ($catName in @('Storage','Memory','Power','DisplayGpu','GamingFeatures','Background','Hygiene','Security')) {
         $catChecks = @($checks | Where-Object { $_.Category -eq $catName })
         $pts = ($catChecks | Measure-Object -Property Points -Sum).Sum
         $mx = ($catChecks | Measure-Object -Property Max -Sum).Sum
@@ -691,15 +1274,13 @@ function Get-GamingOptimizationScore {
             Points = [math]::Round($pts, 2)
             Max    = [math]::Round($mx, 2)
         })
-        if ($pct -lt $lowestCatScore) {
-            $lowestCatScore = $pct
-            $biggestLimiter = $catName
-        }
     }
 
-    $overall = [int][math]::Round($weightedSum)
-    if ($overall -lt 0) { $overall = 0 }
-    if ($overall -gt 100) { $overall = 100 }
+    $catList = @($categories.ToArray())
+    $biggestLimiter = Get-BiggestScoreLimiter $catList
+    $weightedOverall = [int][math]::Round($weightedSum)
+    $displayed = Get-DisplayedOptimizationScore -WeightedScore $weightedOverall -ScanStatus $scanFresh.Status
+    $overall = [int]$displayed.Score
     $grade = Get-OptimizationGrade $overall
 
     $topFixes = @(
@@ -736,10 +1317,12 @@ function Get-GamingOptimizationScore {
         Score               = [int]$overall
         Grade               = [string]$grade
         BiggestLimiter      = [string]$biggestLimiter
-        Categories          = [object[]]@($categories.ToArray())
+        Categories          = [object[]]$catList
         Checks              = [object[]]@($checks.ToArray())
         TopFixes            = [object[]]@($topFixes)
         HardwareReadiness   = $hardwareReadiness
+        WeightedScore       = [int]$displayed.Weighted
+        ScoreNote           = [string]$displayed.Note
         Disclaimer          = 'Config/setup score for gaming feel - not a GPU/CPU benchmark.'
     }
 
@@ -761,6 +1344,7 @@ function Format-OptimizationScoreText {
     }
     $lines = New-Object System.Collections.Generic.List[string]
     [void]$lines.Add(('Setup score: {0}/100  -  {1}. Hardware you own is part of this. Top fixes are what you can change.' -f $ScoreObject.Score, $ScoreObject.Grade))
+    if ($ScoreObject.ScoreNote) { [void]$lines.Add([string]$ScoreObject.ScoreNote) }
     [void]$lines.Add(('Biggest limiter: {0}' -f $ScoreObject.BiggestLimiter))
     [void]$lines.Add(('Hardware readiness: {0} ({1}/{2})  -  {3}' -f `
         $ScoreObject.HardwareReadiness.Label,
@@ -811,22 +1395,41 @@ function Invoke-OptimizationScoreReport {
     return $score
 }
 
-function Open-StartupSettings {
+function Open-TaskScheduler {
     try {
-        Start-Process 'ms-settings:startupapps'
+        Start-Process 'taskschd.msc'
         return $true
     } catch {
-        try {
-            Start-Process 'shell:startup'
-            return $true
-        } catch {
-            return $false
-        }
+        return $false
+    }
+}
+
+function Open-ServicesConsole {
+    try {
+        Start-Process 'services.msc'
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Open-StartupSettings {
+    if (Get-Command Start-UserSettingsPage -EA SilentlyContinue) {
+        if (Start-UserSettingsPage 'ms-settings:startupapps') { return $true }
+    }
+    try {
+        Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList 'ms-settings:startupapps'
+        return $true
+    } catch {
+        return $false
     }
 }
 
 function Open-DisplaySettings {
     try {
+        if (Get-Command Start-UserSettingsPage -EA SilentlyContinue) {
+            if (Start-UserSettingsPage 'ms-settings:display') { return $true }
+        }
         Start-Process 'ms-settings:display'
         return $true
     } catch {
@@ -892,8 +1495,19 @@ function Invoke-RecommendedOptimizationFixes {
                 'OpenStartup' {
                     if (Open-StartupSettings) { Write-Ok "Opened Startup apps settings" }
                 }
+                'OpenServices' {
+                    if (Open-ServicesConsole) { Write-Ok "Opened Services" }
+                }
+                'OpenTasks' {
+                    if (Open-TaskScheduler) { Write-Ok "Opened Task Scheduler" }
+                }
                 'OpenDisplay' {
                     if (Open-DisplaySettings) { Write-Ok "Opened Display settings" }
+                }
+                'OpenSecurity' {
+                    if (Get-Command Open-WindowsSecurity -EA SilentlyContinue) {
+                        if (Open-WindowsSecurity) { Write-Ok "Opened Windows Security" }
+                    }
                 }
             }
         }

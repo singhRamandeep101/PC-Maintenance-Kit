@@ -19,10 +19,11 @@ treat it as one.
 | `PC-Maintenance.ps1` | Entry point. Dot-sources everything in `lib\`, handles `-Mode` dispatch (Gui/Cli/Full/CleanupOnly/UpdatesOnly/Repair/FullRepair/Scheduled), admin elevation, and top-level error UI. |
 | `lib\Core.ps1` | Shared helpers: path safety (`Join-PathSafe`, `Test-PathSafe`, `Test-SafeCleanupPath`), mode flags (`Apply-ModeFlags`, `Reset-MaintenanceFlags`), core maintenance run logic (`Invoke-MaintenanceRun`). |
 | `lib\Gui.ps1` | WinForms shell (`Show-MaintenanceGui`) — chrome, nav, actions, DPI. |
-| `lib\GuiPages.ps1` | Tab page builders (Home/Cleanup/Updates/Gaming/Repair/Device). |
+| `lib\GuiPages.ps1` | Tab page builders (Home/Cleanup/Updates/Gaming/Repair/Security/Device). |
 | `lib\Care.ps1` | Care presets (Gamer/Quiet/Full) + weekly Task Scheduler helpers. |
 | `lib\Gaming.ps1` | Gaming status/optimizations (power plan, Discord HW accel, etc.). |
 | `lib\Device.ps1` | Device/hardware summary (`Get-DeviceSummary`, cached). |
+| `lib\Security.ps1` | Security health (`Get-SecurityHealth`, cached). Reads Defender, firewall, and Malwarebytes, then opens those apps. Does not scan. |
 | `lib\Score.ps1` | Gaming Optimization Score (`Get-GamingOptimizationScore`) — config/setup scoring + top fixes. |
 | `lib\Extras.ps1` | Cleanup preview, self-update, and `$Script:AppVersion` via `Get-KitVersion` (reads `VERSION`). |
 | `Start.bat` | Double-click launcher for an already-cloned/extracted copy. |
@@ -107,15 +108,15 @@ the parse check above is the closest thing to one, so a syntax error will fail t
 ## Release build
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-Release.ps1 -Version 5.4.2
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-Release.ps1 -Version 5.5.0
 ```
 
-Produces `dist\PC-Maintenance-Kit-v5.4.2.zip` and `.zip.sha256`. Optional signing:
+Produces `dist\PC-Maintenance-Kit-v5.5.0.zip` and `.zip.sha256`. Optional signing:
 
 ```powershell
-.\Build-Release.ps1 -Version 5.4.2 -CertThumbprint 'THUMBPRINT'
+.\Build-Release.ps1 -Version 5.5.0 -CertThumbprint 'THUMBPRINT'
 # or
-.\Build-Release.ps1 -Version 5.4.2 -PfxPath 'C:\certs\pcmk.pfx' -PfxPassword 'your-password'
+.\Build-Release.ps1 -Version 5.5.0 -PfxPath 'C:\certs\pcmk.pfx' -PfxPassword 'your-password'
 ```
 
 CI (`.github\workflows\ci.yml`) runs the test suite, then runs `Build-Release.ps1` (using

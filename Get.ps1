@@ -9,7 +9,7 @@
     Administrator permission is requested on launch.
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/singhRamandeep101/PC-Maintenance-Kit/v5.4.2/Get.ps1 | iex
+    irm https://raw.githubusercontent.com/singhRamandeep101/PC-Maintenance-Kit/v5.5.0/Get.ps1 | iex
 
 .NOTES
     The ZIP this script downloads is checked against its SHA256 before anything is installed.
@@ -45,6 +45,47 @@ function Test-Sha256File {
     return $actual
 }
 
+function Test-TrustedKitDownloadUrl([string]$Url) {
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
+    $uri = $null
+    try { $uri = [Uri]$Url } catch { return $false }
+    if ($uri.Scheme -ne 'https') { return $false }
+    $hostName = $uri.Host.ToLowerInvariant()
+    # GitHub's download CDN is not accepted here. The release URL on github.com
+    # is what we approve; the client may follow GitHub's own redirect after that.
+    $repoHosts = @('github.com', 'api.github.com', 'codeload.github.com')
+    $known = $false
+    foreach ($name in $repoHosts) {
+        if ($hostName -eq $name) { $known = $true; break }
+    }
+    if (-not $known) { return $false }
+    $path = $uri.AbsolutePath.ToLowerInvariant()
+    return ($path -like '*/singhramandeep101/pc-maintenance-kit/*' -or $path -like '*/singhramandeep101/pc-maintenance-kit')
+}
+
+function Test-ZipEntriesSafe {
+    param([string]$ZipPath, [string]$Destination)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -EA SilentlyContinue
+    $zip = $null
+    try {
+        $destRoot = [System.IO.Path]::GetFullPath($Destination)
+        if (-not $destRoot.EndsWith('\')) { $destRoot = $destRoot + '\' }
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+        foreach ($entry in $zip.Entries) {
+            $name = ([string]$entry.FullName).Replace('/', '\')
+            if ([string]::IsNullOrWhiteSpace($name)) { continue }
+            if ($name.StartsWith('\') -or $name.StartsWith('..') -or $name.Contains('..\')) { return $false }
+            $target = [System.IO.Path]::GetFullPath((Join-Path $Destination $name.TrimStart('\')))
+            if (-not $target.StartsWith($destRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+        }
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($zip) { $zip.Dispose() }
+    }
+}
+
 function Select-KitZip($Assets) {
     $zips = @($Assets | Where-Object { $_.name -match '\.zip$' -and $_.name -notmatch '\.sha256' -and $_.browser_download_url })
     $named = @($zips | Where-Object { $_.name -like 'PC-Maintenance-Kit-v*.zip' })
@@ -62,6 +103,9 @@ function Get-ReleaseDownload {
     $sumAsset = @($rel.assets | Where-Object { $_.name -eq $wantSum -and $_.browser_download_url } | Select-Object -First 1)
     if (-not $sumAsset) {
         $sumAsset = @($rel.assets | Where-Object { $_.name -match '\.sha256$' -and $_.browser_download_url } | Select-Object -First 1)
+    }
+    if ($sumAsset -and -not (Test-TrustedKitDownloadUrl ([string]$sumAsset.browser_download_url))) {
+        $sumAsset = $null
     }
     if ($sumAsset) {
         try {
@@ -142,6 +186,9 @@ try {
     }
 
     Write-Host ("  Release {0}" -f $info.Tag) -ForegroundColor DarkGray
+    if (-not (Test-TrustedKitDownloadUrl $info.Url)) {
+        throw "Refusing to download from an unexpected address."
+    }
     Invoke-WebRequest -Uri $info.Url -OutFile $zipPath -UseBasicParsing -Headers @{ 'User-Agent' = 'PC-Maintenance-Kit' }
 
     if (-not (Test-Path -LiteralPath $zipPath) -or ((Get-Item -LiteralPath $zipPath).Length -lt 1000)) {
@@ -156,6 +203,9 @@ try {
     Write-Host ("  SHA256 OK  {0}" -f $got) -ForegroundColor Green
 
     $extract = Join-Path $Work 'extract'
+    if (-not (Test-ZipEntriesSafe -ZipPath $zipPath -Destination $extract)) {
+        throw "Refusing to extract this ZIP because an entry escapes the folder."
+    }
     Expand-Archive -LiteralPath $zipPath -DestinationPath $extract -Force
     Unblock-Tree $extract
     $source = Resolve-PayloadRoot $extract

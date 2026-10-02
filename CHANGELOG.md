@@ -1,5 +1,20 @@
 # Changelog
 
+## 5.5.0
+
+Security health is a status page. It reads Windows Defender, the firewall, and whether Malwarebytes is installed, then opens those apps. It does not scan or change protection settings.
+
+- Security tab shows real-time protection, signature age, last scans, active threats, firewall profiles, and Malwarebytes
+- Open Malwarebytes and Open Windows Security launch the apps. A missing Malwarebytes install does not mark the PC unprotected
+- Home shows one Security line. A Defender scan older than 20 days holds the setup score at Needs work and shows the weighted total beside it. The biggest limiter is the category that costs the most points. A repeat read within 10 seconds reuses the last result. The window updates when you refresh or run an action
+- Temp cleanup no longer touches Windows Internet cache or the WebCache database
+- Gaming lists the apps actually set to start with Windows, including Store apps, and ignores ones you already turned off. If that app's service is still set to start, the list says so. A sign-in task is listed only when its name reads like an app name
+- The installer and self-update start a download only from this repository on github.com, and they refuse a ZIP entry that escapes the install folder. The checksum is still the one published with that release
+- Opening Home, Gaming, or Security reads security and the score again once the last result is older than 10 seconds. The window does not poll in the background
+- Open Startup apps opens the Startup apps page. Recommendations name real apps, and internal sign-in task ids are left out
+- A service match uses the service file path, including the DLL behind svchost. A short name no longer matches a longer folder name. Extra sign-in tasks with a readable name lower the startup check to a warning and open Startup apps
+- CLI option 7 prints the same report and does not launch anything
+
 ## 5.4.2
 
 Home, Cleanup, and Updates use the same cards as the rest of the window. The setup score weighs settings you can change more than the hardware you already own. Stop no longer kills DISM or SFC. The weekly task does not install updates unless you opt in, and Home shows what the last run did.

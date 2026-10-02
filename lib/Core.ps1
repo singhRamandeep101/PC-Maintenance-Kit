@@ -571,6 +571,12 @@ function Clear-HardwareProbeCaches {
     $Script:ProtectedCleanupPathsCache = $null
     $Script:DeviceSummaryCache = $null
     $Script:DeviceSummaryCacheUtc = [datetime]::MinValue
+    $Script:SecurityHealthCache = $null
+    $Script:SecurityHealthCacheUtc = [datetime]::MinValue
+    $Script:AutoServiceCache = $null
+    $Script:AutoServiceCacheUtc = [datetime]::MinValue
+    $Script:LogonTaskCache = $null
+    $Script:LogonTaskCacheUtc = [datetime]::MinValue
     $Script:OptimizationScoreCache = $null
     $Script:OptimizationScoreCacheUtc = [datetime]::MinValue
     $Script:CleanupPreviewCache = $null
@@ -1009,14 +1015,13 @@ function Remove-OldFilesInPath {
 function Invoke-TempCleanup {
     Write-Step "Cleaning temp files (older than $($Script:TempOlderThanDays) day(s))"
     $total = 0L
-    # GPU shader caches are handled only by Invoke-ShaderCacheCleanup (checkbox-driven)
+    # GPU shader caches are handled only by Invoke-ShaderCacheCleanup (checkbox-driven).
+    # Internet cache and the Windows web database stay. They are profile data, not temp files.
     $paths = @(Select-UniqueCleanupPaths -Paths @(
         $env:TEMP,
         "$env:LOCALAPPDATA\Temp",
         (Get-WindowsTempPath),
-        "$env:LOCALAPPDATA\CrashDumps",
-        "$env:LOCALAPPDATA\Microsoft\Windows\INetCache",
-        "$env:LOCALAPPDATA\Microsoft\Windows\WebCache"
+        "$env:LOCALAPPDATA\CrashDumps"
     ))
 
     $i = 0

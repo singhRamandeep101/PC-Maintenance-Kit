@@ -33,8 +33,27 @@ function Invoke-RestartComputerConfirmed {
     return $true
 }
 
+function Start-UserSettingsPage([string]$Uri) {
+    # This kit runs as Administrator. Settings then opens on its home page
+    # and drops the section. explorer.exe belongs to the normal user session,
+    # so the page in the address actually opens.
+    $explorer = Join-Path $env:SystemRoot 'explorer.exe'
+    try {
+        Start-Process -FilePath $explorer -ArgumentList $Uri
+        return $true
+    } catch {
+        try {
+            Start-Process $Uri
+            return $true
+        } catch {
+            return $false
+        }
+    }
+}
+
 function Open-StorageSettings {
     try {
+        if (Start-UserSettingsPage 'ms-settings:storagesense') { return $true }
         Start-Process "ms-settings:storagesense"
         return $true
     } catch {

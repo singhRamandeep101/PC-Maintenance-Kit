@@ -526,7 +526,46 @@ function New-GameStatusRow {
     }
 }
 
-function Set-ActiveNav([string]$Name) {
+function Test-GuiProbeStale {
+    param($Utc, [int]$Seconds = 10)
+    if ($null -eq $Utc) { return $true }
+    try {
+        if (([datetime]$Utc) -eq [datetime]::MinValue) { return $true }
+        return (([datetime]::UtcNow - ([datetime]$Utc)).TotalSeconds -ge $Seconds)
+    } catch {
+        return $true
+    }
+}
+
+function Update-GuiPageOnVisit([string]$Name) {
+    # Opening Home, Gaming, or Security reads again once the last result is
+    # older than 10 seconds. Hardware probes keep their own longer cache.
+    if ($Script:GuiBusy) { return }
+    if ($Name -eq 'Security') {
+        if (Test-GuiProbeStale $Script:SecurityHealthCacheUtc) {
+            Update-GuiSecurityPanel -Refresh
+        }
+        return
+    }
+    if ($Name -ne 'Home' -and $Name -ne 'Gaming') { return }
+    if (-not (Test-GuiProbeStale $Script:OptimizationScoreCacheUtc)) { return }
+    $Script:OptimizationScoreCache = $null
+    $Script:OptimizationScoreCacheUtc = [datetime]::MinValue
+    $Script:SecurityHealthCache = $null
+    $Script:SecurityHealthCacheUtc = [datetime]::MinValue
+    $Script:AutoServiceCache = $null
+    $Script:AutoServiceCacheUtc = [datetime]::MinValue
+    $Script:LogonTaskCache = $null
+    $Script:LogonTaskCacheUtc = [datetime]::MinValue
+    if ($Name -eq 'Home') {
+        Update-GuiOptimizationScore
+        Update-GuiSecurityHomeLine
+    } else {
+        Update-GuiGamingStatus
+    }
+}
+
+function Set-ActiveNav([string]$Name, [switch]$FromUser) {
     $t = $Script:Theme
     foreach ($key in $Script:NavButtons.Keys) {
         $btn = $Script:NavButtons[$key]
@@ -539,6 +578,7 @@ function Set-ActiveNav([string]$Name) {
     foreach ($key in $Script:ContentPanels.Keys) {
         $Script:ContentPanels[$key].Visible = ($key -eq $Name)
     }
+    if ($FromUser) { Update-GuiPageOnVisit $Name }
 }
 
 function Set-GuiBusy([bool]$Busy) {
@@ -548,7 +588,8 @@ function Set-GuiBusy([bool]$Busy) {
         'BtnFixPower','BtnRestorePower','BtnCopyRamTip','BtnRestartNow','BtnOpenStorage',
         'BtnDiscordOff','BtnRefreshGame','BtnRefreshHome','BtnAmd','BtnNv','BtnRestoreOnly',
         'BtnCheckUpdate','BtnCli','BtnQuit','BtnScanScore','BtnApplyOptFixes','BtnFixMyPc',
-        'BtnPresetGamer','BtnPresetQuiet','BtnPresetFull','ChkScheduleWeekly','ChkScheduleUpdates','ChkScheduleGaming'
+        'BtnPresetGamer','BtnPresetQuiet','BtnPresetFull','ChkScheduleWeekly','ChkScheduleUpdates','ChkScheduleGaming',
+        'BtnOpenMalwarebytes','BtnOpenWindowsSecurity','BtnRefreshSecurity','BtnOpenStartup'
     )
     foreach ($n in $runBtns) {
         $b = $Script:GuiControls.$n
@@ -571,6 +612,9 @@ function Set-GuiBusy([bool]$Busy) {
         if (Get-Command Set-PageLiveStatus -EA SilentlyContinue) {
             try { Set-PageLiveStatus -Idle } catch { }
         }
+    }
+    if (Get-Command Update-MalwarebytesLaunchButton -EA SilentlyContinue) {
+        try { Update-MalwarebytesLaunchButton } catch { }
     }
     Update-GuiStatusBar
 }
@@ -614,7 +658,7 @@ function Resolve-LiveStatusTarget([string]$Title) {
 function Resolve-GuiRefreshMode([string]$Title) {
     if ([string]::IsNullOrWhiteSpace($Title)) { return 'Light' }
     switch -Regex ($Title) {
-        '(?i)^(AMD|NVIDIA)$|Checking for updates|Update check|Device report|Optimization score|Fix my PC|Gaming optimize|Recommended fixes' { return 'None' }
+        '(?i)^(AMD|NVIDIA)$|Checking for updates|Update check|Device report|Optimization score|Fix my PC|Gaming optimize|Recommended fixes|Security health' { return 'None' }
         '(?i)cleanup|preview|weekly|repair|^updates$|restore|power|discord' { return 'Space' }
         default { return 'Light' }
     }
@@ -638,6 +682,12 @@ function Invoke-GuiPanelsRefresh {
         } else {
             $Script:DeviceSummaryCache = $null
             $Script:OptimizationScoreCache = $null
+            $Script:SecurityHealthCache = $null
+            $Script:SecurityHealthCacheUtc = [datetime]::MinValue
+            $Script:AutoServiceCache = $null
+            $Script:AutoServiceCacheUtc = [datetime]::MinValue
+            $Script:LogonTaskCache = $null
+            $Script:LogonTaskCacheUtc = [datetime]::MinValue
         }
         # Score refresh pulls a fresh device summary once; then bind all panels from cache.
         try { $null = Get-GamingOptimizationScore -Refresh } catch {
@@ -672,6 +722,10 @@ function Invoke-GuiPanelsRefresh {
     Pump-Ui
     try { Update-GuiDevicePanel } catch {
         Write-Warn ("Could not refresh Device: {0}" -f $_.Exception.Message)
+    }
+    Pump-Ui
+    try { Update-GuiSecurityPanel } catch {
+        Write-Warn ("Could not refresh Security: {0}" -f $_.Exception.Message)
     }
     Pump-Ui
     try { Update-GuiGamingStatus -SkipScore } catch {
@@ -985,6 +1039,7 @@ function Update-GuiHomeSummary {
 
     # Keep the Home score card in sync without forcing a CIM refresh every time
     Update-GuiOptimizationScore -Refresh:$Refresh
+    try { Update-GuiSecurityHomeLine } catch { }
 }
 
 function Apply-GuiWeeklyFlags {
@@ -1040,6 +1095,111 @@ function Get-ScoreLetter([string]$Grade) {
         'Needs work' { return 'C' }
         default { return 'D' }
     }
+}
+
+function Update-GuiSecurityHomeLine {
+    param($Health)
+    if (-not $Script:GuiControls -or -not $Script:GuiControls.HomeSecurityVal) { return }
+    if (-not $Health) {
+        if (-not (Get-Command Get-SecurityHealth -EA SilentlyContinue)) { return }
+        try { $Health = Get-SecurityHealth } catch { return }
+    }
+    $line = ("Security: {0}" -f $Health.Verdict)
+    $Script:GuiControls.HomeSecurityVal.Text = $line
+    if ($Script:Theme) {
+        if ($Health.Verdict -eq 'Protected') {
+            $Script:GuiControls.HomeSecurityVal.ForeColor = $Script:Theme.Success
+        } elseif ($Health.Verdict -eq 'Needs attention') {
+            $Script:GuiControls.HomeSecurityVal.ForeColor = $Script:Theme.Warn
+        } else {
+            $Script:GuiControls.HomeSecurityVal.ForeColor = $Script:Theme.Muted
+        }
+    }
+}
+
+function Update-MalwarebytesLaunchButton {
+    if (-not $Script:GuiControls) { return }
+    $btn = $Script:GuiControls.BtnOpenMalwarebytes
+    if (-not $btn) { return }
+    if ($Script:GuiBusy) {
+        $btn.Enabled = $false
+        return
+    }
+    $path = $null
+    try {
+        if (Get-Command Get-SecurityHealth -EA SilentlyContinue) {
+            $path = (Get-SecurityHealth).Malwarebytes.Path
+        }
+    } catch { }
+    $btn.Enabled = [bool]($path -and (Test-Path -LiteralPath $path))
+}
+
+function Set-SecurityRowColor($Ctrl, [string]$State) {
+    if (-not $Ctrl -or -not $Script:Theme) { return }
+    $t = $Script:Theme
+    if ($State -eq 'On' -or $State -eq 'Current' -or $State -eq 'None' -or $State -eq 'Protected') {
+        $Ctrl.ForeColor = $t.Success
+    } elseif ($State -eq 'Off' -or $State -eq 'Out of date' -or $State -eq 'Needs attention') {
+        $Ctrl.ForeColor = $t.Warn
+    } elseif ($State -eq 'Unknown' -or $State -eq 'Not installed' -or $State -eq 'Muted') {
+        $Ctrl.ForeColor = $t.Muted
+    } else {
+        $Ctrl.ForeColor = $t.Text
+    }
+}
+
+function Update-GuiSecurityPanel {
+    param([switch]$Refresh)
+    if (-not $Script:GuiControls) { return }
+    if (-not (Get-Command Get-SecurityHealth -EA SilentlyContinue)) { return }
+    $health = $null
+    try { $health = Get-SecurityHealth -Refresh:$Refresh } catch { return }
+    if (-not $health) { return }
+
+    Set-GuiLabelText SecVerdict $health.Verdict
+    Set-SecurityRowColor $Script:GuiControls.SecVerdict $health.Verdict
+    $summary = 'Real-time protection is on. Scans stay in Windows Security or Malwarebytes.'
+    if ($health.Verdict -ne 'Protected' -and $health.Reasons -and @($health.Reasons).Count -gt 0) {
+        $summary = [string]@($health.Reasons)[0]
+    }
+    Set-GuiLabelText SecSummary $summary
+    if ($health.Verdict -eq 'Needs attention') {
+        Set-SecurityRowColor $Script:GuiControls.SecSummary 'Needs attention'
+    } else {
+        Set-SecurityRowColor $Script:GuiControls.SecSummary 'Muted'
+    }
+
+    $sigText = $health.Defender.Signatures
+    if (Get-Command Format-SignatureHealthText -EA SilentlyContinue) {
+        $sigText = Format-SignatureHealthText $health.Defender
+    }
+    Set-GuiLabelText SecRealtime $health.Defender.RealTime
+    Set-SecurityRowColor $Script:GuiControls.SecRealtime $health.Defender.RealTime
+    Set-GuiLabelText SecSignatures $sigText
+    Set-SecurityRowColor $Script:GuiControls.SecSignatures $health.Defender.Signatures
+    Set-GuiLabelText SecQuickScan $health.Defender.LastQuickScan
+    Set-GuiLabelText SecFullScan $health.Defender.LastFullScan
+    Set-GuiLabelText SecThreats $health.Defender.Threats
+    $threatState = 'Unknown'
+    if ($null -ne $health.Defender.ThreatCount) {
+        if ($health.Defender.ThreatCount -gt 0) { $threatState = 'Needs attention' } else { $threatState = 'None' }
+    }
+    Set-SecurityRowColor $Script:GuiControls.SecThreats $threatState
+    Set-GuiLabelText SecFirewall $health.Firewall.Detail
+    Set-SecurityRowColor $Script:GuiControls.SecFirewall $health.Firewall.Status
+    Set-GuiLabelText SecMalwarebytes $health.Malwarebytes.Detail
+    $mbState = 'Not installed'
+    if ($health.Malwarebytes.Installed) { $mbState = 'Installed' }
+    Set-SecurityRowColor $Script:GuiControls.SecMalwarebytes $mbState
+
+    $pill = [string]$health.Verdict
+    if ($health.Verdict -eq 'Needs attention' -and $health.Reasons -and @($health.Reasons).Count -gt 0) {
+        $pill = ("{0} - {1}" -f $health.Verdict, [string]@($health.Reasons)[0])
+    }
+    Set-GuiLabelText SecPill $pill
+    Set-SecurityRowColor $Script:GuiControls.SecPill $health.Verdict
+    Update-GuiSecurityHomeLine -Health $health
+    Update-MalwarebytesLaunchButton
 }
 
 function Set-GuiLabelText($Name, [string]$Text) {
@@ -1141,6 +1301,13 @@ function Update-GuiOptimizationScore {
         }
         $fixText = ($fixLines -join "`r`n")
     }
+    if ($score.ScoreNote) {
+        $fixText = ([string]$score.ScoreNote) + "`r`n" + $fixText
+    }
+    $gradeLabel = [string]$score.Grade
+    if ($null -ne $score.WeightedScore -and [int]$score.WeightedScore -ne [int]$score.Score) {
+        $gradeLabel = ("{0}  (weighted {1})" -f $score.Grade, [int]$score.WeightedScore)
+    }
 
     foreach ($pair in @(
         @{ Score = 'OptScoreVal'; Grade = 'OptGradeVal'; Limiter = 'OptLimiterVal'; Fixes = 'OptFixesVal' },
@@ -1156,10 +1323,10 @@ function Update-GuiOptimizationScore {
         }
         if ($gr) {
             if ($pair.Score -eq 'OptScoreVal') {
-                $gr.Text = [string]$score.Grade
+                $gr.Text = $gradeLabel
                 $gr.ForeColor = $t.Accent
             } else {
-                $gr.Text = ("/100  {0}" -f $score.Grade)
+                $gr.Text = ("/100  {0}" -f $gradeLabel)
                 $gr.ForeColor = $t.Text
             }
         }
@@ -1180,8 +1347,8 @@ function Update-GuiOptimizationScore {
     Set-GuiLabelText OptGradeLetter $letter
     Set-GuiLabelText DevGradeLetter $letter
     $dot = [char]0x00B7
-    Set-GuiLabelText OptStatusPill ("Score {0}  {1}  {2}" -f $score.Score, $dot, $score.Grade)
-    Set-GuiLabelText DevScoreLine ("{0} / 100  {1}  {2}" -f $score.Score, $dot, $score.Grade)
+    Set-GuiLabelText OptStatusPill ("Score {0}  {1}  {2}" -f $score.Score, $dot, $gradeLabel)
+    Set-GuiLabelText DevScoreLine ("{0} / 100  {1}  {2}" -f $score.Score, $dot, $gradeLabel)
 }
 
 function Update-GuiGamingStatus {
@@ -1209,6 +1376,29 @@ function Update-GuiGamingStatus {
     Set-StatusVal $Script:GuiControls.ReLiveVal $reliveText ($reliveText -eq "Off" -or $reliveText -eq "N/A")
     Set-StatusVal $Script:GuiControls.PowerVal $power ($power -match 'Ultimate|High')
     Set-StatusVal $Script:GuiControls.DiscordVal $discordText ($discordText -eq "Off")
+
+    try {
+        $startupApps = @(Get-StartupApps)
+        $startupText = Format-StartupAppList $startupApps
+        $startupOn = @($startupApps | Where-Object { $_.Enabled }).Count
+        $holdText = ''
+        try { $holdText = Format-StartupServiceHoldList (Get-StartupServiceHolds -Apps $startupApps) } catch { $holdText = '' }
+        if ($holdText) { $startupText = $startupText + "`r`n" + $holdText }
+        $logonText = ''
+        try { $logonText = Format-LogonTaskList (Get-ExtraLogonTaskNames -Apps $startupApps) } catch { $logonText = '' }
+        if ($logonText) { $startupText = $startupText + "`r`n" + $logonText }
+        Set-GuiLabelText GameStartupVal $startupText
+        if ($Script:GuiControls.GameStartupVal) {
+            if ($holdText -or $startupOn -gt 5) {
+                if ($startupOn -gt 12) { $Script:GuiControls.GameStartupVal.ForeColor = $t.Danger }
+                else { $Script:GuiControls.GameStartupVal.ForeColor = $t.Warn }
+            } else {
+                $Script:GuiControls.GameStartupVal.ForeColor = $t.Success
+            }
+        }
+    } catch {
+        Set-GuiLabelText GameStartupVal 'Could not read startup apps'
+    }
 
     if (-not $SkipScore) {
         Update-GuiOptimizationScore -Refresh:$RefreshScore
@@ -1238,7 +1428,7 @@ public static extern bool SetProcessDpiAwarenessContext(System.IntPtr dpiContext
     }
 }
 
-# Page builders (Home/Cleanup/Updates/Gaming/Repair/Device)
+# Page builders (Home/Cleanup/Updates/Gaming/Repair/Security/Device)
 $__guiDir = $PSScriptRoot
 if (-not $__guiDir) { $__guiDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
 . (Join-Path $__guiDir 'GuiPages.ps1')
@@ -1353,6 +1543,7 @@ function Show-MaintenanceGui {
         Updates = 'E895'
         Gaming  = 'E7FC'
         Repair  = 'E90F'
+        Security = 'E72E'
         Device  = 'E7F4'
     }
 
@@ -1391,7 +1582,7 @@ function Show-MaintenanceGui {
     $navRail.BackColor = $t.Header
     $navRail.Padding = New-Object System.Windows.Forms.Padding(8, 12, 8, 8)
 
-    $navNames = @('Device','Repair','Gaming','Updates','Cleanup','Home')
+    $navNames = @('Device','Security','Repair','Gaming','Updates','Cleanup','Home')
     foreach ($name in $navNames) {
         $nb = New-Object System.Windows.Forms.Button
         $nb.Text = $name
@@ -1409,7 +1600,7 @@ function Show-MaintenanceGui {
         $nb.Padding = New-Object System.Windows.Forms.Padding(42, 0, 8, 0)
         $nb.Add_Click({
             param($sender, $e)
-            Set-ActiveNav ([string]$sender.Text)
+            Set-ActiveNav ([string]$sender.Text) -FromUser
         })
         $nb.Add_MouseEnter({
             param($sender, $e)
@@ -1675,6 +1866,7 @@ function Show-MaintenanceGui {
     $pageUpd = New-Content "Updates"
     $pageGame = New-Content "Gaming"
     $pageRepair = New-Content "Repair"
+    $pageSec = New-Content "Security"
     $pageDev = New-Content "Device"
 
     $homeParts = Add-GuiHomePage -Page $pageHome -Theme $t
@@ -1682,6 +1874,7 @@ function Show-MaintenanceGui {
     $updParts = Add-GuiUpdatesPage -Page $pageUpd -Theme $t
     $gameParts = Add-GuiGamingPage -Page $pageGame -Theme $t
     $repairParts = Add-GuiRepairPage -Page $pageRepair -Theme $t
+    $secParts = Add-GuiSecurityPage -Page $pageSec -Theme $t
     $devParts = Add-GuiDevicePage -Page $pageDev -Theme $t
 
     function Merge-GuiParts($Target, $Parts) {
@@ -1693,6 +1886,7 @@ function Show-MaintenanceGui {
     Merge-GuiParts $merged $updParts
     Merge-GuiParts $merged $gameParts
     Merge-GuiParts $merged $repairParts
+    Merge-GuiParts $merged $secParts
     Merge-GuiParts $merged $devParts
 
     $Script:GuiControls = [pscustomobject]@{
@@ -1715,11 +1909,14 @@ function Show-MaintenanceGui {
         HomeGradeVal    = $merged.HomeGradeVal
         HomeLimiterVal  = $merged.HomeLimiterVal
         HomeFixesVal    = $merged.HomeFixesVal
+        HomeSecurityVal = $merged.HomeSecurityVal
         GameModeVal     = $merged.GameModeVal
         GameDvrVal      = $merged.GameDvrVal
         ReLiveVal       = $merged.ReLiveVal
         PowerVal        = $merged.PowerVal
         DiscordVal      = $merged.DiscordVal
+        GameStartupVal  = $merged.GameStartupVal
+        BtnOpenStartup  = $merged.BtnOpenStartup
         ChkHomeRestore  = $merged.ChkHomeRestore
         ChkHomeShader   = $merged.ChkHomeShader
         ChkHomeGaming   = $merged.ChkHomeGaming
@@ -1787,6 +1984,19 @@ function Show-MaintenanceGui {
         DevRebootPill   = $merged.DevRebootPill
         DevChip         = $merged.DevChip
         DevRamTip       = $merged.DevRamTip
+        BtnOpenMalwarebytes = $merged.BtnOpenMalwarebytes
+        BtnOpenWindowsSecurity = $merged.BtnOpenWindowsSecurity
+        BtnRefreshSecurity = $merged.BtnRefreshSecurity
+        SecFirewall     = $merged.SecFirewall
+        SecFullScan     = $merged.SecFullScan
+        SecMalwarebytes = $merged.SecMalwarebytes
+        SecPill         = $merged.SecPill
+        SecQuickScan    = $merged.SecQuickScan
+        SecRealtime     = $merged.SecRealtime
+        SecSignatures   = $merged.SecSignatures
+        SecSummary      = $merged.SecSummary
+        SecThreats      = $merged.SecThreats
+        SecVerdict      = $merged.SecVerdict
     }
 
 
@@ -1820,6 +2030,7 @@ function Show-MaintenanceGui {
     if ($Script:GuiControls.RamMain) { $Script:GuiControls.RamMain.Text = "Scanning..." }
     if ($Script:GuiControls.HomeScoreVal) { $Script:GuiControls.HomeScoreVal.Text = ".." }
     if ($Script:GuiControls.HomeGradeVal) { $Script:GuiControls.HomeGradeVal.Text = "Reading hardware..." }
+    if ($Script:GuiControls.HomeSecurityVal) { $Script:GuiControls.HomeSecurityVal.Text = "Security: Reading..." }
     if ($Script:GuiControls.Free) { $Script:GuiControls.Free.Text = "C: free ..." }
     if ($Script:GuiControls.RebootBadge) { $Script:GuiControls.RebootBadge.Text = "..." }
     if ($Script:GuiControls.DeviceSummary) { $Script:GuiControls.DeviceSummary.Text = "Scanning hardware..." }
@@ -1845,7 +2056,7 @@ function Show-MaintenanceGui {
                 Set-GuiBusy $true
                 Set-UiStatusText "Reading hardware..."
                 Update-GuiStatusBar -JobText "Reading hardware..."
-                Append-UiLog "Scanning device, score, and gaming status..." "Cyan"
+                Append-UiLog "Scanning device, security, score, and gaming status..." "Cyan"
                 Pump-Ui
                 Invoke-GuiPanelsRefresh -Mode Hardware -DoneText "Ready"
                 Update-GuiCareScheduleStatus
@@ -1949,6 +2160,7 @@ function Show-MaintenanceGui {
     $btnRestorePower = $c.BtnRestorePower
     $btnDiscordOff = $c.BtnDiscordOff
     $btnRefreshGame = $c.BtnRefreshGame
+    $btnOpenStartup = $c.BtnOpenStartup
     $btnRepair = $c.BtnRepair
     $btnRestoreOnly = $c.BtnRestoreOnly
     $btnRefreshDevice = $c.BtnRefreshDevice
@@ -1956,6 +2168,9 @@ function Show-MaintenanceGui {
     $btnCopyRamTip = $c.BtnCopyRamTip
     $btnOpenStorage = $c.BtnOpenStorage
     $btnRestartNow = $c.BtnRestartNow
+    $btnOpenMalwarebytes = $c.BtnOpenMalwarebytes
+    $btnOpenWindowsSecurity = $c.BtnOpenWindowsSecurity
+    $btnRefreshSecurity = $c.BtnRefreshSecurity
 
     $btnWeekly.Add_Click({
         if ($Script:GuiBusy) { return }
@@ -2275,6 +2490,21 @@ function Show-MaintenanceGui {
         Update-GuiStatusBar -JobText "Gaming status refreshed"
     })
 
+    $btnOpenStartup.Add_Click({
+        if ($Script:GuiBusy) { return }
+        if (Open-StartupSettings) {
+            Append-UiLog "Opened Startup apps" "Gray"
+            Update-GuiStatusBar -JobText "Startup apps opened"
+        } else {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Could not open Startup apps.",
+                "PC Maintenance",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            ) | Out-Null
+        }
+    })
+
     $btnRepair.Add_Click({
         if ($Script:GuiBusy) { return }
         Save-GuiSettings $Script:GuiControls
@@ -2305,6 +2535,44 @@ function Show-MaintenanceGui {
             $Script:TotalSteps = 1
             $Script:CurrentStep = 0
             Invoke-DeviceHealthReport
+        }
+    })
+
+    $btnRefreshSecurity.Add_Click({
+        if ($Script:GuiBusy) { return }
+        Invoke-GuiAction -Title "Security health" -Action {
+            Update-GuiSecurityPanel -Refresh
+            Append-UiLog "Security status refreshed" "Gray"
+        }
+    })
+
+    $btnOpenWindowsSecurity.Add_Click({
+        if ($Script:GuiBusy) { return }
+        if (Open-WindowsSecurity) {
+            Append-UiLog "Opened Windows Security" "Gray"
+            Update-GuiStatusBar -JobText "Windows Security opened"
+        } else {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Could not open Windows Security.",
+                "PC Maintenance",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            ) | Out-Null
+        }
+    })
+
+    $btnOpenMalwarebytes.Add_Click({
+        if ($Script:GuiBusy) { return }
+        if (Open-Malwarebytes) {
+            Append-UiLog "Opened Malwarebytes" "Gray"
+            Update-GuiStatusBar -JobText "Malwarebytes opened"
+        } else {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Malwarebytes is not installed, or its program could not be opened.",
+                "PC Maintenance",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            ) | Out-Null
         }
     })
 
@@ -2417,6 +2685,7 @@ function Show-CliMenu {
     Write-Host "  [4] Repair Windows (DISM + SFC)"
     Write-Host "  [5] Full + Repair + Updates"
     Write-Host "  [6] Gaming optimization score"
+    Write-Host "  [7] Security health"
     Write-Host "  [Q] Quit"
     Write-Host "  ========================================"
     Write-Host ""
@@ -2447,6 +2716,14 @@ function Show-CliMenu {
             [void](Invoke-OptimizationScoreReport)
             Write-Host ""
             Write-Host (Format-OptimizationScoreText)
+            Write-Host ""
+            Write-Host "  Press Enter to close..."
+            [void][System.Console]::ReadLine()
+            return
+        }
+        '7' {
+            Write-Host ""
+            Write-Host (Format-SecurityHealthText)
             Write-Host ""
             Write-Host "  Press Enter to close..."
             [void][System.Console]::ReadLine()

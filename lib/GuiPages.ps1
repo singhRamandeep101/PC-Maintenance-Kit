@@ -292,8 +292,9 @@ function Add-GuiHomePage {
     $homeGradeVal = New-BodyLabel 'Reading hardware...' $t.Accent (New-Object System.Drawing.Font('Segoe UI Semibold', 11))
     Set-LabelChrome $homeGradeVal $t.Panel
     $homeLimiterVal = New-CardLabel $t 'Scanning...' $t.Muted $smallFont 4
+    $homeSecurityVal = New-CardLabel $t 'Security: Reading...' $t.Muted $smallFont 4
     $homeFixesVal = New-CardLabel $t '' $t.Muted $smallFont 0
-    foreach ($lbl in @($homeScoreVal, $homeGradeVal, $homeLimiterVal, $homeFixesVal)) {
+    foreach ($lbl in @($homeScoreVal, $homeGradeVal, $homeLimiterVal, $homeSecurityVal, $homeFixesVal)) {
         $scoreCard.Controls.Add($lbl)
     }
     $left.Controls.Add($scoreCard)
@@ -371,6 +372,7 @@ function Add-GuiHomePage {
         HomeGradeVal = $homeGradeVal
         HomeLimiterVal = $homeLimiterVal
         HomeScoreVal = $homeScoreVal
+        HomeSecurityVal = $homeSecurityVal
         LblLastScheduledRun = $lblLastScheduledRun
         LblScheduleStatus = $lblScheduleStatus
         RamMain = $ramCard.Main
@@ -715,6 +717,12 @@ function Add-GuiGamingPage {
     }
     $left.Controls.Add($statusCard)
 
+    $startupCard = New-FigmaCard $t
+    $startupCard.Controls.Add((New-CardLabel $t 'Starts with Windows' $t.Text $titleFont 8))
+    $gameStartupVal = New-CardLabel $t 'Reading startup apps...' $t.Muted $smallFont 0
+    $startupCard.Controls.Add($gameStartupVal)
+    $left.Controls.Add($startupCard)
+
     $fixesCard = New-FigmaCard $t
     $fixesCard.Controls.Add((New-CardLabel $t 'Top fixes' $t.Text $titleFont 8))
     $optFixesVal = New-CardLabel $t 'Scanning...' $t.Muted $smallFont 0
@@ -732,6 +740,7 @@ function Add-GuiGamingPage {
     $btnFixPower = Add-CardButton $actions (New-PremiumButton 'Fix power plan (Ultimate)' (New-Object System.Drawing.Point(0, 0)) (New-Object System.Drawing.Size(280, 36)) 'Ghost')
     $btnRestorePower = Add-CardButton $actions (New-PremiumButton 'Restore previous power plan' (New-Object System.Drawing.Point(0, 0)) (New-Object System.Drawing.Size(280, 36)) 'Ghost')
     $btnDiscordOff = Add-CardButton $actions (New-PremiumButton 'Discord HW accel OFF' (New-Object System.Drawing.Point(0, 0)) (New-Object System.Drawing.Size(280, 36)) 'Ghost')
+    $btnOpenStartup = Add-CardButton $actions (New-PremiumButton 'Open Startup apps' (New-Object System.Drawing.Point(0, 0)) (New-Object System.Drawing.Size(280, 36)) 'Ghost')
     $btnScanScore = Add-CardButton $actions (New-PremiumButton 'Scan optimization score' (New-Object System.Drawing.Point(0, 0)) (New-Object System.Drawing.Size(280, 36)) 'Ghost')
     $btnRefreshGame = Add-CardButton $actions (New-PremiumButton 'Refresh status' (New-Object System.Drawing.Point(0, 0)) (New-Object System.Drawing.Size(280, 36)) 'Ghost')
     $hint = New-CardLabel $t 'This number mixes hardware you already own with settings you can change. Top fixes are the part you can change. Fullscreen and an FPS cap near the refresh rate help 1% lows.' $t.Muted $smallFont 0
@@ -744,7 +753,9 @@ function Add-GuiGamingPage {
         BtnFixPower = $btnFixPower
         BtnRestorePower = $btnRestorePower
         BtnGamingOpt = $btnGamingOpt
+        BtnOpenStartup = $btnOpenStartup
         BtnRefreshGame = $btnRefreshGame
+        GameStartupVal = $gameStartupVal
         BtnScanScore = $btnScanScore
         DiscordVal = $rowDiscord.Value
         GameDvrVal = $rowDvr.Value
@@ -981,5 +992,69 @@ function Add-GuiDevicePage {
         DevRebootPill = $devRebootPill
         DevScoreLine = $devScoreLine
         DevTrim = $rowTrim.Value
+    }
+}
+
+function Add-GuiSecurityPage {
+    param($Page, $Theme)
+    $t = $Theme
+    $cols = New-TwoColumn $Page $t 62
+    $left = $cols.Left
+    $right = $cols.Right
+    $titleFont = New-Object System.Drawing.Font('Segoe UI Semibold', 11)
+    $smallFont = New-Object System.Drawing.Font('Segoe UI', 9)
+
+    [void](Add-PageTitle $left $t 'Security')
+    $sub = Add-Hint $left $t 'Protection status for this PC. Scans run in Windows Security or Malwarebytes, not in this kit.'
+    $sub.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 12)
+
+    $strip = New-FigmaCard $t
+    $secVerdict = New-BodyLabel 'Reading...' $t.Text (New-Object System.Drawing.Font('Segoe UI Semibold', 22))
+    Set-LabelChrome $secVerdict $t.Panel
+    $secSummary = New-CardLabel $t 'Checking Defender, firewall, and Malwarebytes.' $t.Muted $smallFont 0
+    $strip.Controls.Add($secVerdict)
+    $strip.Controls.Add($secSummary)
+    $left.Controls.Add($strip)
+
+    $specs = New-FigmaCard $t
+    $specs.Controls.Add((New-CardLabel $t 'Protection' $t.Text $titleFont 8))
+    $rowRealtime = New-SpecRow $t 'Real-time protection'
+    $rowSignatures = New-SpecRow $t 'Signatures'
+    $rowQuick = New-SpecRow $t 'Last quick scan'
+    $rowFull = New-SpecRow $t 'Last full scan'
+    $rowThreats = New-SpecRow $t 'Threats'
+    $rowFirewall = New-SpecRow $t 'Firewall'
+    $rowMb = New-SpecRow $t 'Malwarebytes'
+    foreach ($spec in @($rowRealtime, $rowSignatures, $rowQuick, $rowFull, $rowThreats, $rowFirewall, $rowMb)) {
+        $specs.Controls.Add($spec.Panel)
+    }
+    $left.Controls.Add($specs)
+
+    $secPill = Add-LiveStatus $right $t 'Reading protection...'
+    $secPill.ForeColor = $t.Muted
+    $secPill.Margin = New-Object System.Windows.Forms.Padding(0, 4, 0, 12)
+
+    $actions = New-FigmaCard $t
+    $actions.Controls.Add((New-CardLabel $t 'Actions' $t.Text $titleFont 8))
+    $btnOpenMb = Add-CardButton $actions (New-PremiumButton 'Open Malwarebytes' (New-Object System.Drawing.Point(0, 0)) (New-Object System.Drawing.Size(280, 44)) 'Primary')
+    $btnOpenDefender = Add-CardButton $actions (New-PremiumButton 'Open Windows Security' (New-Object System.Drawing.Point(0, 0)) (New-Object System.Drawing.Size(280, 36)) 'Ghost')
+    $btnRefreshSecurity = Add-CardButton $actions (New-PremiumButton 'Refresh' (New-Object System.Drawing.Point(0, 0)) (New-Object System.Drawing.Size(280, 36)) 'Ghost')
+    $actions.Controls.Add((New-CardLabel $t 'This page does not scan, update signatures, or change protection settings. Malwarebytes not being installed does not mark the PC unprotected.' $t.Muted $smallFont 0))
+    $right.Controls.Add($actions)
+
+    return [ordered]@{
+        BtnOpenMalwarebytes = $btnOpenMb
+        BtnOpenWindowsSecurity = $btnOpenDefender
+        BtnRefreshSecurity = $btnRefreshSecurity
+        SecFirewall = $rowFirewall.Value
+        SecFullScan = $rowFull.Value
+        SecMalwarebytes = $rowMb.Value
+        SecPill = $secPill
+        SecQuickScan = $rowQuick.Value
+        SecRealtime = $rowRealtime.Value
+        SecSignatures = $rowSignatures.Value
+        SecSummary = $secSummary
+        SecThreats = $rowThreats.Value
+        SecVerdict = $secVerdict
     }
 }
