@@ -532,7 +532,10 @@ try {
     Set-Content -LiteralPath $mbExe -Value 'not a real executable' -Encoding ASCII
     $mbFound = Find-MalwarebytesInstall -SearchRoots @($mbRoot)
     Assert-True ($mbFound.Installed) 'Fake Malwarebytes.exe is detected'
-    Assert-True ($mbFound.Path -eq $mbExe) 'Fake Malwarebytes path is the planted exe'
+    # CI's TEMP can be a short path while the search returns the long path.
+    $mbFoundPath = (Resolve-Path -LiteralPath $mbFound.Path).ProviderPath
+    $mbPlantedPath = (Resolve-Path -LiteralPath $mbExe).ProviderPath
+    Assert-True ($mbFoundPath -eq $mbPlantedPath) 'Fake Malwarebytes path is the planted exe'
     $mbAbsent = Find-MalwarebytesInstall -SearchRoots @($mbMissing)
     Assert-True (-not $mbAbsent.Installed) 'Search root with no Malwarebytes.exe is not installed'
 } finally {
