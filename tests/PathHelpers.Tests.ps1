@@ -832,6 +832,25 @@ Assert-True (@($wingetParsed.Bulk) -contains 'Unity.UnityHub') 'Bulk section kee
 Assert-True (@($wingetParsed.Explicit) -contains 'Unity.Unity.2022') 'Explicit section keeps the Unity editor'
 Assert-True (@($wingetParsed.Unknown) -contains 'Roblox.Roblox') 'Unknown-version section keeps Roblox'
 Assert-True (@($wingetParsed.Bulk) -notcontains 'Unity.Unity.2022') 'Explicit id is not treated as a bulk upgrade'
+$hubRow = @($wingetParsed.Rows | Where-Object { $_.Id -eq 'Unity.UnityHub' }) | Select-Object -First 1
+Assert-True ($hubRow.Name -eq 'Unity Hub') 'Bulk row keeps the app name'
+Assert-True ($hubRow.Version -eq '3.4.1') 'Bulk row keeps the installed version'
+Assert-True ($hubRow.Available -eq '3.8.0') 'Bulk row keeps the available version'
+Assert-True ($hubRow.Section -eq 'bulk') 'Bulk row section is bulk'
+$editorRow = @($wingetParsed.Rows | Where-Object { $_.Id -eq 'Unity.Unity.2022' }) | Select-Object -First 1
+Assert-True ($editorRow.Name -eq 'Unity Editor 2022.3.62f1') 'Explicit row keeps the editor name'
+Assert-True ($editorRow.Section -eq 'explicit') 'Explicit row section is explicit'
+$wingetChoices = @(Get-WingetUpgradeChoices -Rows $wingetParsed.Rows -BulkIds $wingetParsed.Bulk -ExplicitIds $wingetParsed.Explicit)
+Assert-True ($wingetChoices.Count -eq 2) 'Choices include bulk and explicit apps'
+Assert-True ((Format-WingetUpgradeLabel $wingetChoices[0]) -match 'Unity Hub') 'Choice label includes the app name'
+Assert-True ((Format-WingetUpgradeLabel $wingetChoices[1]) -match '\(direct\)') 'Explicit choice is marked direct'
+$wingetSplit = Split-WingetUpgradeSelection -BulkIds @('Unity.UnityHub','Mozilla.Firefox') -ExplicitIds @('Unity.Unity.2022') -SelectedIds @('Mozilla.Firefox')
+Assert-True (@($wingetSplit.Bulk) -contains 'Mozilla.Firefox') 'Selection keeps the checked bulk app'
+Assert-True (@($wingetSplit.ExcludedBulk) -contains 'Unity.UnityHub') 'Selection holds back the unchecked bulk app'
+Assert-True (@($wingetSplit.Explicit).Count -eq 0) 'Unchecked explicit app is not upgraded'
+Assert-True ($coreRaw -match 'Show-WingetPackagePicker') 'Core.ps1 asks which winget apps to update'
+Assert-True ($coreRaw -match 'CheckedListBox') 'Core.ps1 uses a checklist for winget apps'
+Assert-True ($coreRaw -match 'ExcludedJoined') 'Unchecked winget apps are passed into the upgrade job'
 Assert-True ((Get-WingetUpgradeOutcome -Text 'Successfully upgraded' -ExitCode 0) -eq 'Upgraded') 'Direct upgrade success is Upgraded'
 Assert-True ((Get-WingetUpgradeOutcome -Text 'Installer failed with exit code 1' -ExitCode 1) -eq 'Failed') 'Direct upgrade failure is Failed'
 Assert-True ((Get-WingetUpgradeOutcome -Text 'This package does not support silent install' -ExitCode 0) -eq 'NeedsInteraction') 'Silent-unsupported installer is NeedsInteraction'

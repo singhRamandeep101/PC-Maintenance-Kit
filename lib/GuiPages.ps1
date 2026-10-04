@@ -472,8 +472,8 @@ function Add-GuiUpdatesPage {
 
     $about = New-FigmaCard $t
     $about.Controls.Add((New-CardLabel $t 'What a run does' $t.Text $titleFont 8))
-    $about.Controls.Add((New-CardLabel $t 'Installs Windows Update, then every normal winget app in one silent pass.' $t.Muted $smallFont 4))
-    $about.Controls.Add((New-CardLabel $t 'Apps winget excludes from that pass (such as Unity editors) get their own silent upgrade and a result in the log.' $t.Muted $smallFont 4))
+    $about.Controls.Add((New-CardLabel $t 'Installs Windows Update, then asks which winget apps to update.' $t.Muted $smallFont 4))
+    $about.Controls.Add((New-CardLabel $t 'Leave every app checked for one silent pass. Uncheck any, and only the checked apps are installed. Unity editors are in that list too.' $t.Muted $smallFont 4))
     $about.Controls.Add((New-CardLabel $t 'Self-updaters (Roblox, Discord, Steam, Epic) are skipped. Apps whose version winget cannot read are named and left alone.' $t.Muted $smallFont 0))
     $left.Controls.Add($about)
 

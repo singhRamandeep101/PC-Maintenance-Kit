@@ -1484,16 +1484,21 @@ function ConvertFrom-WingetUpgradeList {
     $bulk = New-Object System.Collections.Generic.List[string]
     $explicit = New-Object System.Collections.Generic.List[string]
     $unknown = New-Object System.Collections.Generic.List[string]
+    $rows = New-Object System.Collections.Generic.List[object]
     $section = 'bulk'
     $idCol = -1
     $verCol = -1
+    $availCol = -1
+    $srcCol = -1
     foreach ($line in ([string]$Text -split "`r?`n")) {
         if ($line -match '^\s*$') { continue }
-        if ($line -match '(?i)explicit targeting') { $section = 'explicit'; $idCol = -1; $verCol = -1; continue }
-        if ($line -match '(?i)cannot be determined') { $section = 'unknown'; $idCol = -1; $verCol = -1; continue }
+        if ($line -match '(?i)explicit targeting') { $section = 'explicit'; $idCol = -1; $verCol = -1; $availCol = -1; $srcCol = -1; continue }
+        if ($line -match '(?i)cannot be determined') { $section = 'unknown'; $idCol = -1; $verCol = -1; $availCol = -1; $srcCol = -1; continue }
         if ($line -match '^Name\s+Id\s+Version') {
             $idCol = $line.IndexOf('Id')
             $verCol = $line.IndexOf('Version')
+            $availCol = $line.IndexOf('Available')
+            $srcCol = $line.IndexOf('Source')
             continue
         }
         if ($line -match '^-+' -or $line -match '\d\s+upgrades?\s+available' -or $line -match '^\s*\d+\s+package' -or $line -match 'The following packages' -or $line -match 'have an upgrade available' -or $line -match 'No installed package found' -or $line -match 'No newer package versions') {
@@ -1516,15 +1521,43 @@ function ConvertFrom-WingetUpgradeList {
                    ($id -cmatch '^[A-Z0-9]{8,16}$')
         if (-not $idValid -or $id -match '^(Name|Id|Version|Available|Source|winget|msstore)$' -or $id -match '^\d') { continue }
 
+        $name = ''
+        $version = ''
+        $available = ''
+        if ($idCol -gt 0 -and $line.Length -gt 0) {
+            $nameEnd = [Math]::Min($idCol, $line.Length)
+            $name = $line.Substring(0, $nameEnd).Trim()
+        }
+        if ($verCol -ge 0 -and $line.Length -gt $verCol) {
+            $verEnd = $line.Length
+            if ($availCol -gt $verCol) { $verEnd = [Math]::Min($availCol, $line.Length) }
+            if ($verEnd -gt $verCol) { $version = $line.Substring($verCol, $verEnd - $verCol).Trim() }
+        }
+        if ($availCol -ge 0 -and $line.Length -gt $availCol) {
+            $avEnd = $line.Length
+            if ($srcCol -gt $availCol) { $avEnd = [Math]::Min($srcCol, $line.Length) }
+            if ($avEnd -gt $availCol) { $available = $line.Substring($availCol, $avEnd - $availCol).Trim() }
+        }
+
         $dest = $bulk
         if ($section -eq 'explicit') { $dest = $explicit }
         elseif ($section -eq 'unknown') { $dest = $unknown }
-        if (-not $dest.Contains($id)) { [void]$dest.Add($id) }
+        if (-not $dest.Contains($id)) {
+            [void]$dest.Add($id)
+            [void]$rows.Add([pscustomobject]@{
+                Name      = $name
+                Id        = $id
+                Version   = $version
+                Available = $available
+                Section   = $section
+            })
+        }
     }
     return [pscustomobject]@{
         Bulk     = [string[]]@($bulk.ToArray())
         Explicit = [string[]]@($explicit.ToArray())
         Unknown  = [string[]]@($unknown.ToArray())
+        Rows     = @($rows.ToArray())
     }
 }
 
@@ -1538,6 +1571,381 @@ function Get-WingetUpgradeOutcome {
     if ($code -ne 0) { return 'Failed' }
     if ($Text -match '(?i)installer failed|installation failed|failed to install|exit code') { return 'Failed' }
     return 'Finished'
+}
+
+function Format-WingetUpgradeLabel {
+    param($Choice)
+    $name = ''
+    if ($Choice -and $Choice.Name) { $name = [string]$Choice.Name.Trim() }
+    if (-not $name -and $Choice) { $name = [string]$Choice.Id }
+    $label = $name
+    if ($Choice -and $Choice.Id -and ([string]$Choice.Id) -ne $name) {
+        $label = ("{0}   {1}" -f $name, $Choice.Id)
+    }
+    $from = ''
+    $to = ''
+    if ($Choice) {
+        $from = [string]$Choice.Version
+        $to = [string]$Choice.Available
+    }
+    if ($from -and $to) {
+        $label = ("{0}   {1} -> {2}" -f $label, $from, $to)
+    } elseif ($to) {
+        $label = ("{0}   -> {1}" -f $label, $to)
+    }
+    if ($Choice -and $Choice.Section -eq 'explicit') {
+        $label = ("{0}   (direct)" -f $label)
+    }
+    return $label
+}
+
+function Get-WingetUpgradeChoices {
+    param(
+        $Rows,
+        $BulkIds,
+        $ExplicitIds
+    )
+    $byKey = @{}
+    foreach ($row in @($Rows)) {
+        if (-not $row -or -not $row.Id) { continue }
+        $key = ('{0}|{1}' -f $row.Section, $row.Id)
+        if (-not $byKey.ContainsKey($key)) { $byKey[$key] = $row }
+    }
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($pair in @(
+        @{ Section = 'bulk'; Ids = @($BulkIds) },
+        @{ Section = 'explicit'; Ids = @($ExplicitIds) }
+    )) {
+        foreach ($id in @($pair.Ids)) {
+            if ([string]::IsNullOrWhiteSpace($id)) { continue }
+            $key = ('{0}|{1}' -f $pair.Section, $id)
+            $row = $null
+            if ($byKey.ContainsKey($key)) { $row = $byKey[$key] }
+            $name = ''
+            $version = ''
+            $available = ''
+            if ($row) {
+                $name = [string]$row.Name
+                $version = [string]$row.Version
+                $available = [string]$row.Available
+            }
+            [void]$list.Add([pscustomobject]@{
+                Name      = $name
+                Id        = [string]$id
+                Version   = $version
+                Available = $available
+                Section   = [string]$pair.Section
+            })
+        }
+    }
+    return @($list.ToArray())
+}
+
+function Split-WingetUpgradeSelection {
+    param(
+        $BulkIds,
+        $ExplicitIds,
+        $SelectedIds
+    )
+    $selected = @{}
+    foreach ($id in @($SelectedIds)) {
+        if ($id) { $selected[[string]$id] = $true }
+    }
+    $selBulk = New-Object System.Collections.Generic.List[string]
+    $exBulk = New-Object System.Collections.Generic.List[string]
+    $selExplicit = New-Object System.Collections.Generic.List[string]
+    foreach ($id in @($BulkIds)) {
+        if ([string]::IsNullOrWhiteSpace($id)) { continue }
+        if ($selected.ContainsKey([string]$id)) { [void]$selBulk.Add([string]$id) }
+        else { [void]$exBulk.Add([string]$id) }
+    }
+    foreach ($id in @($ExplicitIds)) {
+        if ([string]::IsNullOrWhiteSpace($id)) { continue }
+        if ($selected.ContainsKey([string]$id)) { [void]$selExplicit.Add([string]$id) }
+    }
+    return [pscustomobject]@{
+        Bulk         = [string[]]@($selBulk.ToArray())
+        ExcludedBulk = [string[]]@($exBulk.ToArray())
+        Explicit     = [string[]]@($selExplicit.ToArray())
+    }
+}
+
+function Read-WingetPackageSelection {
+    param(
+        [object[]]$Choices,
+        [string]$Note = ''
+    )
+    $choicesLocal = @($Choices | Where-Object { $_ -and $_.Id })
+    $count = $choicesLocal.Count
+    if ($count -eq 0) { return @() }
+    $checked = New-Object 'bool[]' $count
+    for ($i = 0; $i -lt $count; $i++) { $checked[$i] = $true }
+    while ($true) {
+        Write-Host ""
+        Write-Host "  Choose winget apps to update"
+        Write-Host "  Checked apps are updated. Unchecked apps are left as they are."
+        if ($Note) {
+            foreach ($noteLine in ($Note -split "`r?`n")) {
+                if ($noteLine.Trim()) { Write-Host ("  {0}" -f $noteLine.Trim()) }
+            }
+        }
+        Write-Host ""
+        for ($i = 0; $i -lt $count; $i++) {
+            $mark = ' '
+            if ($checked[$i]) { $mark = 'x' }
+            Write-Host ("  [{0}] {1,2}. {2}" -f $mark, ($i + 1), (Format-WingetUpgradeLabel $choicesLocal[$i]))
+        }
+        Write-Host ""
+        Write-Host "  Number toggles a row. A = all, N = none, U = update, Q = cancel"
+        $ans = Read-Host "  Choice"
+        if ($null -eq $ans) { return $null }
+        $trim = $ans.Trim()
+        if ($trim -match '^(?i)q$') { return $null }
+        if ($trim -match '^(?i)u$') {
+            $ids = New-Object System.Collections.Generic.List[string]
+            for ($i = 0; $i -lt $count; $i++) {
+                if ($checked[$i]) { [void]$ids.Add([string]$choicesLocal[$i].Id) }
+            }
+            if ($ids.Count -eq 0) {
+                Write-Host "  Check at least one app, or Q to cancel." -ForegroundColor Yellow
+                continue
+            }
+            return [string[]]@($ids.ToArray())
+        }
+        if ($trim -match '^(?i)a$') {
+            for ($i = 0; $i -lt $count; $i++) { $checked[$i] = $true }
+            continue
+        }
+        if ($trim -match '^(?i)n$') {
+            for ($i = 0; $i -lt $count; $i++) { $checked[$i] = $false }
+            continue
+        }
+        $n = 0
+        $partsOk = $true
+        $any = $false
+        foreach ($part in ($trim -split '[,\s]+')) {
+            if (-not $part) { continue }
+            $any = $true
+            if (-not [int]::TryParse($part, [ref]$n) -or $n -lt 1 -or $n -gt $count) {
+                $partsOk = $false
+                break
+            }
+        }
+        if (-not $any -or -not $partsOk) {
+            Write-Host "  Enter a row number, A, N, U, or Q." -ForegroundColor Yellow
+            continue
+        }
+        foreach ($part in ($trim -split '[,\s]+')) {
+            if (-not $part) { continue }
+            [void][int]::TryParse($part, [ref]$n)
+            $checked[$n - 1] = -not $checked[$n - 1]
+        }
+    }
+}
+
+function Show-WingetPackagePickerForm {
+    param(
+        [object[]]$Choices,
+        [string]$Note = ''
+    )
+    Add-Type -AssemblyName System.Windows.Forms -EA Stop
+    Add-Type -AssemblyName System.Drawing -EA Stop
+    $choicesLocal = @($Choices | Where-Object { $_ -and $_.Id })
+    $bg = [System.Drawing.Color]::FromArgb(15, 15, 27)
+    $panel = [System.Drawing.Color]::FromArgb(26, 26, 46)
+    $textColor = [System.Drawing.Color]::White
+    $muted = [System.Drawing.Color]::FromArgb(165, 165, 197)
+    $accent = [System.Drawing.Color]::FromArgb(0, 180, 216)
+    $ghost = [System.Drawing.Color]::FromArgb(20, 20, 36)
+    try {
+        $theme = $null
+        if ($Script:Theme) { $theme = $Script:Theme }
+        elseif (Get-Command Get-GuiTheme -EA SilentlyContinue) { $theme = Get-GuiTheme }
+        if ($theme) {
+            $bg = $theme.Bg
+            $panel = $theme.Panel
+            $textColor = $theme.Text
+            $muted = $theme.Muted
+            $accent = $theme.Accent
+            if ($theme.BtnGhost) { $ghost = $theme.BtnGhost }
+        }
+    } catch { }
+
+    return Invoke-WithUiModal {
+        $form = $null
+        try {
+            $form = New-Object System.Windows.Forms.Form
+            $form.Text = "Choose winget upgrades"
+            $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+            $form.MaximizeBox = $false
+            $form.MinimizeBox = $false
+            $form.ShowInTaskbar = $false
+            $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+            $form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+            $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Font
+            $form.ClientSize = New-Object System.Drawing.Size(680, 520)
+            $form.BackColor = $bg
+            $form.ForeColor = $textColor
+            $form.Tag = $null
+            $pickerRows = @($choicesLocal)
+
+            $title = New-Object System.Windows.Forms.Label
+            $title.Text = "Choose apps to update"
+            $title.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 12)
+            $title.ForeColor = $textColor
+            $title.BackColor = $bg
+            $title.AutoSize = $false
+            $title.Location = New-Object System.Drawing.Point(20, 16)
+            $title.Size = New-Object System.Drawing.Size(640, 28)
+            $form.Controls.Add($title)
+
+            $hint = New-Object System.Windows.Forms.Label
+            $hint.Text = "Check the apps you want to update. Everything starts checked."
+            $hint.ForeColor = $muted
+            $hint.BackColor = $bg
+            $hint.AutoSize = $false
+            $hint.Location = New-Object System.Drawing.Point(20, 46)
+            $hint.Size = New-Object System.Drawing.Size(640, 36)
+            $form.Controls.Add($hint)
+
+            $list = New-Object System.Windows.Forms.CheckedListBox
+            $list.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+            $list.BackColor = $panel
+            $list.ForeColor = $textColor
+            $list.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+            $list.CheckOnClick = $true
+            $list.IntegralHeight = $false
+            $list.HorizontalScrollbar = $true
+            $list.Location = New-Object System.Drawing.Point(20, 90)
+            $list.Size = New-Object System.Drawing.Size(640, 300)
+            foreach ($choice in $pickerRows) {
+                [void]$list.Items.Add((Format-WingetUpgradeLabel $choice))
+            }
+            for ($i = 0; $i -lt $list.Items.Count; $i++) { $list.SetItemChecked($i, $true) }
+            $form.Controls.Add($list)
+
+            $noteLbl = New-Object System.Windows.Forms.Label
+            $noteLbl.Text = $Note
+            $noteLbl.ForeColor = $muted
+            $noteLbl.BackColor = $bg
+            $noteLbl.AutoSize = $false
+            $noteLbl.Location = New-Object System.Drawing.Point(20, 398)
+            $noteLbl.Size = New-Object System.Drawing.Size(640, 52)
+            $noteLbl.Visible = -not [string]::IsNullOrWhiteSpace($Note)
+            $form.Controls.Add($noteLbl)
+            if (-not $noteLbl.Visible) { $list.Height = 348 }
+
+            $btnAll = New-Object System.Windows.Forms.Button
+            $btnAll.Text = "All"
+            $btnAll.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+            $btnAll.FlatAppearance.BorderSize = 0
+            $btnAll.BackColor = $ghost
+            $btnAll.ForeColor = $textColor
+            $btnAll.Location = New-Object System.Drawing.Point(20, 460)
+            $btnAll.Size = New-Object System.Drawing.Size(88, 36)
+            $form.Controls.Add($btnAll)
+
+            $btnNone = New-Object System.Windows.Forms.Button
+            $btnNone.Text = "None"
+            $btnNone.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+            $btnNone.FlatAppearance.BorderSize = 0
+            $btnNone.BackColor = $ghost
+            $btnNone.ForeColor = $textColor
+            $btnNone.Location = New-Object System.Drawing.Point(116, 460)
+            $btnNone.Size = New-Object System.Drawing.Size(88, 36)
+            $form.Controls.Add($btnNone)
+
+            $btnCancel = New-Object System.Windows.Forms.Button
+            $btnCancel.Text = "Cancel"
+            $btnCancel.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+            $btnCancel.FlatAppearance.BorderSize = 0
+            $btnCancel.BackColor = $ghost
+            $btnCancel.ForeColor = $textColor
+            $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+            $btnCancel.Location = New-Object System.Drawing.Point(392, 460)
+            $btnCancel.Size = New-Object System.Drawing.Size(120, 36)
+            $form.Controls.Add($btnCancel)
+            $form.CancelButton = $btnCancel
+
+            $btnOk = New-Object System.Windows.Forms.Button
+            $btnOk.Text = ("Update ({0})" -f $list.Items.Count)
+            $btnOk.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+            $btnOk.FlatAppearance.BorderSize = 0
+            $btnOk.BackColor = $accent
+            $btnOk.ForeColor = [System.Drawing.Color]::White
+            $btnOk.Location = New-Object System.Drawing.Point(520, 460)
+            $btnOk.Size = New-Object System.Drawing.Size(140, 36)
+            $form.Controls.Add($btnOk)
+            $form.AcceptButton = $btnOk
+
+            $btnAll.Add_Click({
+                for ($n = 0; $n -lt $list.Items.Count; $n++) { $list.SetItemChecked($n, $true) }
+                $btnOk.Text = ("Update ({0})" -f $list.Items.Count)
+            }.GetNewClosure())
+            $btnNone.Add_Click({
+                for ($n = 0; $n -lt $list.Items.Count; $n++) { $list.SetItemChecked($n, $false) }
+                $btnOk.Text = "Update (0)"
+            }.GetNewClosure())
+            $list.Add_ItemCheck({
+                param($sender, $e)
+                $n = 0
+                for ($i = 0; $i -lt $sender.Items.Count; $i++) {
+                    $on = $sender.GetItemChecked($i)
+                    if ($i -eq $e.Index) {
+                        $on = ($e.NewValue -eq [System.Windows.Forms.CheckState]::Checked)
+                    }
+                    if ($on) { $n++ }
+                }
+                $btnOk.Text = ("Update ({0})" -f $n)
+            }.GetNewClosure())
+            $btnOk.Add_Click({
+                $ids = New-Object System.Collections.Generic.List[string]
+                for ($n = 0; $n -lt $list.Items.Count; $n++) {
+                    if ($list.GetItemChecked($n)) { [void]$ids.Add([string]$pickerRows[$n].Id) }
+                }
+                if ($ids.Count -eq 0) {
+                    $hint.Text = "Check at least one app, or Cancel to skip updates."
+                    return
+                }
+                $form.Tag = [string[]]@($ids.ToArray())
+                $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+            }.GetNewClosure())
+
+            $owner = $null
+            try { $owner = Get-UiControl Form } catch { }
+            if ($owner -and -not $owner.IsDisposed) {
+                $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+                [void]$form.ShowDialog($owner)
+            } else {
+                [void]$form.ShowDialog()
+            }
+            $pickedTag = $form.Tag
+            return $pickedTag
+        } finally {
+            if ($form) {
+                try { $form.Dispose() } catch { }
+            }
+        }
+    }
+}
+
+function Show-WingetPackagePicker {
+    param(
+        [object[]]$Choices,
+        [string]$Note = ''
+    )
+    $choicesLocal = @($Choices | Where-Object { $_ -and $_.Id })
+    if ($choicesLocal.Count -eq 0) { return @() }
+    $opened = $false
+    $picked = $null
+    try {
+        $picked = Show-WingetPackagePickerForm -Choices $choicesLocal -Note $Note
+        $opened = $true
+    } catch {
+        Write-Warn ("Could not open the app list: {0}" -f $_.Exception.Message)
+    }
+    if ($opened) { return $picked }
+    return Read-WingetPackageSelection -Choices $choicesLocal -Note $Note
 }
 
 function Invoke-WingetUpdates {
@@ -1633,62 +2041,91 @@ function Invoke-WingetUpdates {
         }
 
         Write-Info ("Found {0} bulk upgrade(s): {1}" -f $count, $(if ($count) { $packageIds -join ", " } else { "(none)" }))
-        $preview = (@($packageIds) | Select-Object -First 12) -join "`n"
-        if ($packageIds.Count -gt 12) { $preview += "`n..." }
-
-        $msg = "winget will upgrade $count package(s) in one silent pass.`n`nInstallers are not opened one by one. This can update browsers, runtimes, and other apps.`nSelf-updaters (Roblox, Discord, Steam, Epic) are skipped.`n`nContinue?"
-        if ($explicitIds.Count -gt 0) {
-            $msg += "`n`nDirect silent upgrades (not included in the bulk pass):`n" + ($explicitIds -join "`n")
+        $choices = @(Get-WingetUpgradeChoices -Rows $parsed.Rows -BulkIds @($packageIds) -ExplicitIds @($explicitIds))
+        $pickerNotes = New-Object System.Collections.Generic.List[string]
+        if ($skipped.Count -gt 0) {
+            [void]$pickerNotes.Add(("Already skipped (they update themselves): {0}" -f (($skipped | Select-Object -Unique) -join ", ")))
         }
         if ($unknownIds.Count -gt 0) {
-            $msg += "`n`nLeft alone (version unknown):`n" + ($unknownIds -join "`n")
+            [void]$pickerNotes.Add(("Not listed (version unknown): {0}" -f ($unknownIds -join ", ")))
         }
-        if ($preview) { $msg += "`n`n" + $preview }
-        $proceed = $false
+        $pickerNote = [string]::Join("`n", [string[]]@($pickerNotes.ToArray()))
+        $selectedIds = $null
         if ($Script:HeadlessRun) {
             # Saved HomeWinget is the opt-in. A hidden Sunday task cannot wait on a dialog.
             Write-Info "Scheduled run: winget upgrades were saved on, so they run without a prompt."
-            $proceed = $true
+            $selectedIds = @($choices | ForEach-Object { [string]$_.Id })
         } else {
-            try {
-                $r = Show-UiMessageBox `
-                    -Text $msg `
-                    -Caption "Confirm winget upgrades" `
-                    -Buttons ([System.Windows.Forms.MessageBoxButtons]::YesNo) `
-                    -Icon ([System.Windows.Forms.MessageBoxIcon]::Question)
-                $proceed = ($r -eq [System.Windows.Forms.DialogResult]::Yes)
-            } catch {
-                Write-Host $msg
-                $ans = Read-Host "Continue with winget upgrades? (Y/N)"
-                $proceed = ($ans -match '^[Yy]')
-            }
+            $selectedIds = Show-WingetPackagePicker -Choices $choices -Note $pickerNote
         }
-        if (-not $proceed) {
+        if ($null -eq $selectedIds) {
             Write-Warn "winget upgrades skipped by user"
             return
         }
+        $split = Split-WingetUpgradeSelection -BulkIds @($packageIds) -ExplicitIds @($explicitIds) -SelectedIds @($selectedIds)
+        $packageIds = [System.Collections.Generic.List[string]]::new()
+        $explicitIds = [System.Collections.Generic.List[string]]::new()
+        $excludedBulkIds = [System.Collections.Generic.List[string]]::new()
+        foreach ($id in @($split.Bulk)) { if ($id) { [void]$packageIds.Add([string]$id) } }
+        foreach ($id in @($split.Explicit)) { if ($id) { [void]$explicitIds.Add([string]$id) } }
+        foreach ($id in @($split.ExcludedBulk)) { if ($id) { [void]$excludedBulkIds.Add([string]$id) } }
+        if ($packageIds.Count -eq 0 -and $explicitIds.Count -eq 0) {
+            Write-Warn "winget upgrades skipped by user"
+            return
+        }
+        $selectedSet = @{}
+        foreach ($id in @($packageIds)) { $selectedSet[[string]$id] = $true }
+        foreach ($id in @($explicitIds)) { $selectedSet[[string]$id] = $true }
+        $chosenNames = New-Object System.Collections.Generic.List[string]
+        $leftNames = New-Object System.Collections.Generic.List[string]
+        foreach ($c in @($choices)) {
+            $label = if ($c.Name) { [string]$c.Name } else { [string]$c.Id }
+            if ($selectedSet.ContainsKey([string]$c.Id)) { [void]$chosenNames.Add($label) }
+            else { [void]$leftNames.Add($label) }
+        }
+        Write-Info ("Updating {0} selected app(s): {1}" -f $chosenNames.Count, ($chosenNames -join ", "))
+        if ($leftNames.Count -gt 0) {
+            Write-Info ("Left unchecked: {0}" -f ($leftNames -join ", "))
+        }
 
         Assert-NotCancelled
-        Write-Info "Upgrading every listed app in one silent winget pass. App updaters are not opened one by one."
-        if ($explicitIds.Count -gt 0) {
-            Write-Info "After that, direct silent upgrades for packages winget excludes from --all."
+        if ($packageIds.Count -gt 0 -and $excludedBulkIds.Count -eq 0) {
+            Write-Info "Upgrading every listed app in one silent winget pass. App updaters are not opened one by one."
+        } elseif ($packageIds.Count -gt 0) {
+            Write-Info ("Upgrading {0} selected app(s) silently. Unchecked apps are not installed." -f $packageIds.Count)
         }
-        # Only pin self-updaters that actually showed up. Pinning the whole skip
-        # list, then upgrading each id, is what made a long queue open installer after installer.
+        if ($explicitIds.Count -gt 0) {
+            Write-Info "Direct silent upgrades for selected packages winget excludes from --all."
+        }
+        # Only pin self-updaters that actually showed up, and only for the all-checked
+        # pass. Pinning the whole skip list, then upgrading each id, is what made a
+        # long queue open installer after installer. A partial selection does not use
+        # "upgrade --all", so an unchecked app cannot be included.
         $skippedJoined = [string]::Join("`n", [string[]]@($skipped))
         $explicitJoined = [string]::Join("`n", [string[]]@($explicitIds))
+        $excludedJoined = [string]::Join("`n", [string[]]@($excludedBulkIds))
+        $selectedBulkJoined = [string]::Join("`n", [string[]]@($packageIds))
         $bulkCount = $packageIds.Count
-        $outObj = Invoke-WithUiWait -Activity "winget upgrade" -TimeoutSec 3600 -LeaveRunning -ArgumentList @($winget, $skippedJoined, $explicitJoined, $bulkCount) -ScriptBlock {
-            param([string]$WingetPath, [string]$SkippedJoined, [string]$ExplicitJoined, [int]$BulkCount)
+        $outObj = Invoke-WithUiWait -Activity "winget upgrade" -TimeoutSec 3600 -LeaveRunning -ArgumentList @($winget, $skippedJoined, $explicitJoined, $bulkCount, $excludedJoined, $selectedBulkJoined) -ScriptBlock {
+            param([string]$WingetPath, [string]$SkippedJoined, [string]$ExplicitJoined, [int]$BulkCount, [string]$ExcludedJoined, [string]$SelectedBulkJoined)
             $mustPin = @()
             if ($SkippedJoined -and $SkippedJoined.Trim()) {
-                $mustPin = @($SkippedJoined -split "`n" | Where-Object { $_ -and $_.Trim() })
+                $mustPin = @($SkippedJoined -split "`n" | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() })
+            }
+            $excluded = @()
+            if ($ExcludedJoined -and $ExcludedJoined.Trim()) {
+                $excluded = @($ExcludedJoined -split "`n" | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() })
+            }
+            $selectedBulk = @()
+            if ($SelectedBulkJoined -and $SelectedBulkJoined.Trim()) {
+                $selectedBulk = @($SelectedBulkJoined -split "`n" | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() })
             }
 
             $addedPins = New-Object System.Collections.Generic.List[string]
             $pinFailed = New-Object System.Collections.Generic.List[string]
+            $useBulk = ($BulkCount -gt 0 -and $excluded.Count -eq 0)
             try {
-                if ($mustPin.Count -gt 0) {
+                if ($useBulk -and $mustPin.Count -gt 0) {
                     $pinList = & $WingetPath pin list --disable-interactivity 2>&1 | Out-String
                     foreach ($s in $mustPin) {
                         if ($pinList -and ($pinList -match [regex]::Escape($s))) { continue }
@@ -1698,21 +2135,35 @@ function Invoke-WingetUpdates {
                     }
                 }
 
-                # One process for the normal list. Do not walk every package.
+                # One process when every normal-list app is checked.
+                # A partial selection upgrades only those ids, so unchecked apps stay put.
                 $bulkText = ''
                 $bulkExit = 0
                 $ok = 0
                 $fail = 0
-                if ($BulkCount -gt 0) {
+                $modeName = 'Direct'
+                $direct = New-Object System.Collections.Generic.List[object]
+                if ($useBulk) {
+                    $modeName = 'Bulk'
                     $bulkText = & $WingetPath upgrade --all --source winget --silent --disable-interactivity --accept-package-agreements --accept-source-agreements 2>&1 | Out-String
                     $bulkExit = $LASTEXITCODE
                     $ok = ([regex]::Matches($bulkText, '(?i)Successfully (installed|upgraded)')).Count
                     $fail = ([regex]::Matches($bulkText, '(?i)installation failed|installer failed|failed to install|Installer failed')).Count
+                } elseif ($BulkCount -gt 0) {
+                    $modeName = 'Selected'
+                    foreach ($id in $selectedBulk) {
+                        $text = & $WingetPath upgrade --id $id --exact --source winget --silent --disable-interactivity --accept-package-agreements --accept-source-agreements 2>&1 | Out-String
+                        [void]$direct.Add([pscustomobject]@{
+                            Id       = $id
+                            Output   = $text
+                            ExitCode = $LASTEXITCODE
+                            Kind     = 'selected'
+                        })
+                    }
                 }
-                $direct = New-Object System.Collections.Generic.List[object]
                 $explicitIdsLocal = @()
                 if ($ExplicitJoined -and $ExplicitJoined.Trim()) {
-                    $explicitIdsLocal = @($ExplicitJoined -split "`n" | Where-Object { $_ -and $_.Trim() })
+                    $explicitIdsLocal = @($ExplicitJoined -split "`n" | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() })
                 }
                 foreach ($id in $explicitIdsLocal) {
                     $text = & $WingetPath upgrade --id $id --exact --source winget --silent --disable-interactivity --accept-package-agreements --accept-source-agreements 2>&1 | Out-String
@@ -1720,9 +2171,16 @@ function Invoke-WingetUpdates {
                         Id       = $id
                         Output   = $text
                         ExitCode = $LASTEXITCODE
+                        Kind     = 'explicit'
                     })
                 }
-                $note = 'One silent winget pass for the normal list'
+                if ($modeName -eq 'Selected') {
+                    $note = 'Selected apps were upgraded on their own so unchecked apps were not included'
+                } elseif ($modeName -eq 'Bulk') {
+                    $note = 'One silent winget pass for the normal list'
+                } else {
+                    $note = 'No normal-list apps were selected'
+                }
                 if ($explicitIdsLocal.Count -gt 0) {
                     $note += ('. Direct upgrades: ' + ($explicitIdsLocal -join ', '))
                 }
@@ -1730,18 +2188,19 @@ function Invoke-WingetUpdates {
                     $note += ('. Could not pin self-updaters: ' + ($pinFailed -join ', '))
                 }
                 $failCount = $fail
-                if ($BulkCount -gt 0 -and $bulkExit -ne 0 -and $failCount -eq 0 -and $ok -eq 0 -and $bulkText -notmatch 'No applicable upgrade|No newer package versions|No installed package found matching input criteria') {
+                if ($modeName -eq 'Bulk' -and $BulkCount -gt 0 -and $bulkExit -ne 0 -and $failCount -eq 0 -and $ok -eq 0 -and $bulkText -notmatch 'No applicable upgrade|No newer package versions|No installed package found matching input criteria') {
                     $failCount = 1
                 }
                 return [pscustomobject]@{
-                    Mode      = 'Bulk'
-                    Output    = $bulkText
-                    OkCount   = $ok
-                    FailCount = $failCount
-                    OkIds     = ''
-                    FailIds   = ''
-                    Note      = $note
-                    Direct    = @($direct.ToArray())
+                    Mode        = $modeName
+                    Output      = $bulkText
+                    OkCount     = $ok
+                    FailCount   = $failCount
+                    OkIds       = ''
+                    FailIds     = ''
+                    Note        = $note
+                    BulkSkipped = $false
+                    Direct      = @($direct.ToArray())
                 }
             } finally {
                 foreach ($s in @($addedPins)) {
@@ -1760,6 +2219,7 @@ function Invoke-WingetUpdates {
         $failIds = ""
         $mode = ""
         $note = ""
+        $bulkSkipped = $false
         try {
             $out = [string]$outPayload.Output
             $okCount = [int]$outPayload.OkCount
@@ -1767,12 +2227,15 @@ function Invoke-WingetUpdates {
             $failIds = [string]$outPayload.FailIds
             try { $mode = [string]$outPayload.Mode } catch { }
             try { $note = [string]$outPayload.Note } catch { }
+            try { $bulkSkipped = [bool]$outPayload.BulkSkipped } catch { }
         } catch {
             $out = Get-AsyncResultText $outObj
             $okCount = ([regex]::Matches($out, '(?i)Successfully (installed|upgraded)')).Count
         }
 
-        if ($note) { Write-Info $note }
+        if ($note) {
+            if ($bulkSkipped) { Write-Warn $note } else { Write-Info $note }
+        }
         if ($mode -eq 'Bulk' -and $okCount -eq 0 -and $failCount -eq 0 -and $packageIds.Count -gt 0) {
             Write-Ok "winget bulk upgrade finished (apps current or already newest)"
         } elseif ($okCount -gt 0) {
@@ -1785,15 +2248,23 @@ function Invoke-WingetUpdates {
         try { $directResults = @($outPayload.Direct) } catch { $directResults = @() }
         foreach ($d in $directResults) {
             if (-not $d -or -not $d.Id) { continue }
+            $kind = ''
+            try { $kind = [string]$d.Kind } catch { }
             $outcome = Get-WingetUpgradeOutcome -Text ([string]$d.Output) -ExitCode $d.ExitCode
             switch ($outcome) {
-                'Upgraded' { Write-Ok ("{0} upgraded (direct, because winget excludes it from upgrade --all)" -f $d.Id) }
+                'Upgraded' {
+                    if ($kind -eq 'selected') { Write-Ok ("{0} upgraded" -f $d.Id) }
+                    else { Write-Ok ("{0} upgraded (direct, because winget excludes it from upgrade --all)" -f $d.Id) }
+                }
                 'Current'  { Write-Ok ("{0} is already current" -f $d.Id) }
                 'NeedsInteraction' {
                     Write-Warn ("{0} was not upgraded. Its installer has no silent mode, so no updater window was opened." -f $d.Id)
                     Write-Info ("Update it from the app, or run: winget upgrade --id {0}" -f $d.Id)
                 }
-                'Finished' { Write-Ok ("{0} direct upgrade finished" -f $d.Id) }
+                'Finished' {
+                    if ($kind -eq 'selected') { Write-Ok ("{0} upgrade finished" -f $d.Id) }
+                    else { Write-Ok ("{0} direct upgrade finished" -f $d.Id) }
+                }
                 default {
                     Write-Warn ("{0} was not upgraded." -f $d.Id)
                     $detail = ([string]$d.Output -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 1)

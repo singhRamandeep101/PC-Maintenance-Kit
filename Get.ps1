@@ -9,7 +9,7 @@
     Administrator permission is requested on launch.
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/singhRamandeep101/PC-Maintenance-Kit/v5.5.0/Get.ps1 | iex
+    irm https://raw.githubusercontent.com/singhRamandeep101/PC-Maintenance-Kit/v5.6.0/Get.ps1 | iex
 
 .NOTES
     The ZIP this script downloads is checked against its SHA256 before anything is installed.

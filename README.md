@@ -2,14 +2,14 @@
 
 Gamer-focused Windows 10/11 maintenance toolkit. Cleanup, gaming tweaks, controlled updates, and optional DISM/SFC repair — in a dark tabbed GUI.
 
-**Current version:** see [`VERSION`](VERSION) (v5.5.0).
+**Current version:** see [`VERSION`](VERSION) (v5.6.0).
 
 ## Run it
 
 Copy this into **PowerShell** and press Enter:
 
 ```powershell
-irm https://raw.githubusercontent.com/singhRamandeep101/PC-Maintenance-Kit/v5.5.0/Get.ps1 | iex
+irm https://raw.githubusercontent.com/singhRamandeep101/PC-Maintenance-Kit/v5.6.0/Get.ps1 | iex
 ```
 
 That downloads the latest **GitHub Release** ZIP, verifies its SHA256, installs it to `%LOCALAPPDATA%\PC-Maintenance-Kit`, adds a Desktop shortcut, and opens the app. Windows will ask for Administrator permission.
@@ -30,7 +30,7 @@ Already have the repo? Double-click **Start.bat**.
 |-----|----------------|
 | **Home** | Score hero, Fix my PC, Gamer/Quiet/Full presets, optional Sunday 6 PM schedule, Weekly Full |
 | **Cleanup** | Temp, all browser profiles, Recycle Bin, GPU shader caches; optional Steam/Epic/Riot caches and WU download-cache wipe (confirm / opt-in) |
-| **Updates** | Windows Update and/or winget (fast bulk silent upgrade from winget source); open AMD Adrenalin / NVIDIA App |
+| **Updates** | Windows Update and/or winget (you pick which apps; checked ones install in one silent pass); open AMD Adrenalin / NVIDIA App |
 | **Gaming** | Optimization score + status; startup apps that actually launch, and services that still start after you turn the app off; apply optimize / recommended fixes, power plan, Discord HW accel |
 | **Repair** | Restore point + DISM/SFC (slow; confirm required) |
 | **Security** | Defender, firewall, and Malwarebytes status. Opens those apps. Does not scan. A Defender scan older than 20 days holds the setup score at Needs work |
@@ -51,7 +51,7 @@ Already have the repo? Double-click **Start.bat**.
 Every GitHub Release includes `PC-Maintenance-Kit-vX.Y.Z.zip` and `PC-Maintenance-Kit-vX.Y.Z.zip.sha256`.
 
 ```powershell
-$zip = "$env:USERPROFILE\Downloads\PC-Maintenance-Kit-v5.5.0.zip"
+$zip = "$env:USERPROFILE\Downloads\PC-Maintenance-Kit-v5.6.0.zip"
 $want = (Get-Content "$zip.sha256" -Raw)
 if ($want -notmatch '([A-Fa-f0-9]{64})') { throw 'Checksum file is missing a hash.' }
 $got = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -113,7 +113,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Build-Release.ps1
 Version comes from the `VERSION` file. Passing `-Version` is allowed only when it matches
 `VERSION`, so the ZIP name can never disagree with the version inside it.
 
-Output: `dist\PC-Maintenance-Kit-v5.5.0.zip` and `dist\PC-Maintenance-Kit-v5.5.0.zip.sha256`
+Output: `dist\PC-Maintenance-Kit-v5.6.0.zip` and `dist\PC-Maintenance-Kit-v5.6.0.zip.sha256`
 
 ## Requirements
 

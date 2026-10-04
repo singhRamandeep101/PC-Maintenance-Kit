@@ -1,5 +1,14 @@
 # Changelog
 
+## 5.6.0
+
+winget asks which apps to update before it installs anything.
+
+- A checklist opens with every available upgrade already checked. Uncheck the ones to leave alone
+- Leave every app checked and they still install in one silent pass. Uncheck any, and only the checked apps are installed
+- A scheduled run still updates every listed app and does not wait on the checklist
+- If the window cannot open, the same choice is a numbered list: a number toggles a row, U updates, Q cancels
+
 ## 5.5.0
 
 Security health is a status page. It reads Windows Defender, the firewall, and whether Malwarebytes is installed, then opens those apps. It does not scan or change protection settings.
